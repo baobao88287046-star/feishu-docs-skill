@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import base64
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -93,6 +95,61 @@ def request_json(
     except urllib.error.URLError as exc:
         raise FeishuError(f"network error: {exc}") from exc
 
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise FeishuError(f"non-json response: {payload[:500]}") from exc
+
+
+def request_multipart_json(
+    path_or_url: str,
+    token: str,
+    fields: Dict[str, Any],
+    file_field: str,
+    file_path: str,
+) -> Dict[str, Any]:
+    url = path_or_url if path_or_url.startswith("http") else API_BASE + path_or_url
+    boundary = "----feishuDocsBoundary" + str(int(time.time() * 1000))
+    file_name = os.path.basename(file_path)
+    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+    body = bytearray()
+    for key, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+
+    with open(file_path, "rb") as fh:
+        file_bytes = fh.read()
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(
+        (
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.extend(file_bytes)
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+    req = urllib.request.Request(
+        url,
+        data=bytes(body),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace")
+        raise FeishuError(f"HTTP {exc.code}: {payload}") from exc
+    except urllib.error.URLError as exc:
+        raise FeishuError(f"network error: {exc}") from exc
     try:
         return json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -188,6 +245,137 @@ def create_docx_children(
         query={"document_revision_id": -1},
         body={"children": children, "index": index},
     )
+
+
+def patch_docx_block(docx_token: str, block_id: str, token: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    return request_json(
+        "PATCH",
+        f"/docx/v1/documents/{docx_token}/blocks/{block_id}",
+        token=token,
+        query={"document_revision_id": -1},
+        body=body,
+    )
+
+
+def upload_docx_image(docx_token: str, image_block_id: str, token: str, image_path: str) -> Dict[str, Any]:
+    size = os.path.getsize(image_path)
+    return request_multipart_json(
+        "/drive/v1/medias/upload_all",
+        token=token,
+        fields={
+            "file_name": os.path.basename(image_path),
+            "parent_type": "docx_image",
+            "parent_node": image_block_id,
+            "size": size,
+        },
+        file_field="file",
+        file_path=image_path,
+    )
+
+
+def extract_created_children(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = response.get("data", {})
+    children = data.get("children")
+    if isinstance(children, list):
+        return children
+    block = data.get("block")
+    if isinstance(block, dict):
+        return [block]
+    return []
+
+
+def extract_file_token(response: Dict[str, Any]) -> str:
+    data = response.get("data", {})
+    token = data.get("file_token") or data.get("token")
+    if token:
+        return token
+    file_data = data.get("file")
+    if isinstance(file_data, dict):
+        token = file_data.get("file_token") or file_data.get("token")
+        if token:
+            return token
+    raise FeishuError(f"cannot find file token in response: {json.dumps(response, ensure_ascii=False)}")
+
+
+def create_table_with_values(
+    docx_token: str,
+    token: str,
+    values: List[List[str]],
+    index: int = -1,
+) -> Dict[str, Any]:
+    row_size = len(values)
+    column_size = max((len(row) for row in values), default=0)
+    table_block = {
+        "block_type": 31,
+        "table": {
+            "property": {
+                "row_size": row_size,
+                "column_size": column_size,
+                "header_row": True,
+            }
+        },
+    }
+    response = create_docx_children(docx_token, docx_token, token, [table_block], index=index)
+    if response.get("code") != 0:
+        raise FeishuError(json.dumps(response, ensure_ascii=False, indent=2))
+    children = extract_created_children(response)
+    if not children:
+        raise FeishuError(f"table create response did not include children: {json.dumps(response, ensure_ascii=False)}")
+    table = children[0]
+    table_id = table.get("block_id")
+    cells = table.get("table", {}).get("cells", [])
+    if not table_id or len(cells) < row_size * column_size:
+        raise FeishuError(f"table response missing cells: {json.dumps(response, ensure_ascii=False)}")
+    flat_values: List[str] = []
+    for row in values:
+        padded = list(row) + [""] * (column_size - len(row))
+        flat_values.extend(padded)
+    for idx, (cell_id, content) in enumerate(zip(cells, flat_values)):
+        cell_block = text_block("text", 2, content)
+        # Bold header row for a stronger readback signal.
+        if idx < column_size:
+            cell_block["text"]["elements"][0]["text_run"]["text_element_style"]["bold"] = True
+        data = create_docx_children(docx_token, cell_id, token, [cell_block], index=0)
+        if data.get("code") != 0:
+            raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+        if idx and idx % 8 == 0:
+            time.sleep(0.4)
+    return {"table_id": table_id, "cells": cells, "values": values}
+
+
+def create_image_block_with_file(
+    docx_token: str,
+    token: str,
+    image_path: str,
+    index: int = -1,
+) -> Dict[str, Any]:
+    response = create_docx_children(docx_token, docx_token, token, [{"block_type": 27, "image": {}}], index=index)
+    if response.get("code") != 0:
+        raise FeishuError(json.dumps(response, ensure_ascii=False, indent=2))
+    children = extract_created_children(response)
+    if not children:
+        raise FeishuError(f"image block create response did not include children: {json.dumps(response, ensure_ascii=False)}")
+    image_block_id = children[0].get("block_id")
+    if not image_block_id:
+        raise FeishuError(f"image block id missing: {json.dumps(response, ensure_ascii=False)}")
+    upload_response = upload_docx_image(docx_token, image_block_id, token, image_path)
+    if upload_response.get("code") != 0:
+        raise FeishuError(json.dumps(upload_response, ensure_ascii=False, indent=2))
+    file_token = extract_file_token(upload_response)
+    patch_response = patch_docx_block(docx_token, image_block_id, token, {"replace_image": {"token": file_token}})
+    if patch_response.get("code") != 0:
+        raise FeishuError(json.dumps(patch_response, ensure_ascii=False, indent=2))
+    return {"image_block_id": image_block_id, "file_token": file_token}
+
+
+def write_sample_png(path: str) -> None:
+    # 1x1 PNG, enough to validate Feishu's image upload/bind flow.
+    png_base64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(path, "wb") as fh:
+        fh.write(base64.b64decode(png_base64))
 
 
 def all_docx_blocks(docx_token: str, token: str, page_size: int = 100) -> List[Dict[str, Any]]:
@@ -526,6 +714,70 @@ def command_roundtrip_docx(args: argparse.Namespace) -> int:
     return 0 if not diff else 1
 
 
+def command_roundtrip_media(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    title = args.title
+    create_response = create_docx(title, token, folder_token=args.folder_token)
+    if create_response.get("code") != 0:
+        print(json.dumps(create_response, ensure_ascii=False, indent=2))
+        return 1
+    docx_token = extract_document_id(create_response)
+    intro = [
+        text_block("heading1", 3, "Feishu media roundtrip validation"),
+        text_block("text", 2, "This document validates table and image insertion."),
+    ]
+    intro_response = create_docx_children(docx_token, docx_token, token, intro, index=0)
+    if intro_response.get("code") != 0:
+        print(json.dumps(intro_response, ensure_ascii=False, indent=2))
+        return 1
+
+    table_values = [
+        ["Metric", "Expected", "Actual"],
+        ["Rows", "3", "3"],
+        ["Status", "OK", "OK"],
+    ]
+    result: Dict[str, Any] = {
+        "code": 0,
+        "title": title,
+        "docx_token": docx_token,
+        "table": {"attempted": True, "created": False, "validated": False},
+        "image": {"attempted": True, "created": False, "validated": False},
+    }
+
+    table_info = create_table_with_values(docx_token, token, table_values, index=-1)
+    result["table"].update({"created": True, "table_id": table_info["table_id"], "cell_count": len(table_info["cells"])})
+
+    image_path = args.image
+    temp_dir: Optional[str] = None
+    if not image_path:
+        temp_dir = tempfile.mkdtemp(prefix="feishu-docs-media-")
+        image_path = os.path.join(temp_dir, "sample.png")
+        write_sample_png(image_path)
+    image_info = create_image_block_with_file(docx_token, token, image_path, index=-1)
+    result["image"].update(
+        {
+            "created": True,
+            "image_block_id": image_info["image_block_id"],
+            "file_token_masked": mask_token(image_info["file_token"]),
+        }
+    )
+
+    time.sleep(args.settle_seconds)
+    blocks = all_docx_blocks(docx_token, token, page_size=100)
+    text = blocks_to_text(blocks)
+    table_markers = [cell for row in table_values for cell in row]
+    result["table"]["validated"] = all(marker in text for marker in table_markers)
+    image_block = next((block for block in blocks if block.get("block_id") == image_info["image_block_id"]), None)
+    result["image"]["validated"] = bool(image_block and image_block.get("image"))
+    result["read_blocks"] = len(blocks)
+    result["matched"] = bool(result["table"]["validated"] and result["image"]["validated"])
+    if temp_dir:
+        result["sample_image"] = image_path
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["matched"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Feishu/Lark Docs helper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -571,6 +823,14 @@ def build_parser() -> argparse.ArgumentParser:
     roundtrip.add_argument("--max-diff-lines", type=int, default=120)
     roundtrip.add_argument("--output-dir", help="write source/expected/actual comparison files")
     roundtrip.set_defaults(func=command_roundtrip_docx)
+
+    media = subparsers.add_parser("roundtrip-media", help="create, write, and validate a Docx table plus image")
+    media.add_argument("--env", help="optional env file")
+    media.add_argument("--title", default="feishu-docs media validation")
+    media.add_argument("--folder-token", help="optional destination folder token")
+    media.add_argument("--image", help="optional local image path; a tiny PNG is generated when omitted")
+    media.add_argument("--settle-seconds", type=float, default=2.0)
+    media.set_defaults(func=command_roundtrip_media)
 
     return parser
 

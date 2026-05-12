@@ -18,6 +18,7 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py resolve-url 'https://xxx.feishu.cn/wiki/...' --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py read-url 'https://xxx.feishu.cn/wiki/...' --env .env --format text
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env
 ```
 
 Credential env names accepted by the helper:
@@ -96,9 +97,25 @@ For a custom fixture:
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env --markdown tests/fixtures/long_doc.md --output-dir /tmp/feishu-docs-roundtrip
 ```
 
+### Validate Tables And Images
+
+Use `roundtrip-media` to test the fragile media chain: create table block, write table cells, create image block, upload image media, bind image token, read back, and validate structure.
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env
+```
+
+With a real local image:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env --image ./example.png
+```
+
+The command should report `matched: true`, with both `table.validated` and `image.validated` set to `true`.
+
 ## Bitable Notes
 
-This first version supports credential checks, URL resolution, Docx reads, Docx Markdown-subset appends, and Docx roundtrip validation. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
+This first version supports credential checks, URL resolution, Docx reads, Docx Markdown-subset appends, Docx roundtrip validation, and table/image insertion validation. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
 
 When implementing Bitable writes:
 

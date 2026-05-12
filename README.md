@@ -54,6 +54,20 @@ The validation command creates a test document, writes generated Markdown conten
 }
 ```
 
+Validate table and image insertion:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env
+```
+
+With a real image:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env --image ./example.png
+```
+
+The media validation command creates a test document, inserts a table, fills table cells, inserts an image block, uploads image media, binds it to the block, reads the document back, and verifies both table and image structure.
+
 ## Feishu Requirements
 
 The enterprise app must have the required API scopes and the target document must add the app as a document app/collaborator.
