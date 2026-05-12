@@ -23,6 +23,29 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env 
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env
 ```
 
+`--env` is optional. The helper loads credentials in this order:
+
+1. The explicit `--env` path.
+2. `.env` in the current working directory.
+3. `~/.codex/secrets/feishu-docs.env`.
+4. `~/.feishu-codex.env`.
+5. Already-exported shell environment variables.
+
+For one-time local setup:
+
+```bash
+mkdir -p ~/.codex/secrets
+chmod 700 ~/.codex/secrets
+cp ./feishu-docs.env ~/.codex/secrets/feishu-docs.env
+chmod 600 ~/.codex/secrets/feishu-docs.env
+```
+
+After that, new Codex threads can usually run without `--env`:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor
+```
+
 Credential env names accepted by the helper:
 
 ```bash
@@ -66,6 +89,8 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor --env .env
 ```
 
 Successful output includes `code: 0`, token expiry, and a masked token.
+
+If `~/.codex/secrets/feishu-docs.env` exists, `--env .env` is not required.
 
 ### Read a Wiki or Docx Link
 

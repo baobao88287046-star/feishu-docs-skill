@@ -28,10 +28,35 @@ FEISHU_APP_SECRET=your_app_secret
 
 Do not commit `.env`.
 
+For new Codex threads to work without passing `--env` every time, put the same values in a local private global file:
+
+```bash
+mkdir -p ~/.codex/secrets
+chmod 700 ~/.codex/secrets
+cp ./feishu-docs.env ~/.codex/secrets/feishu-docs.env
+chmod 600 ~/.codex/secrets/feishu-docs.env
+```
+
+Credential lookup order:
+
+```text
+explicit --env path
+current directory .env
+~/.codex/secrets/feishu-docs.env
+~/.feishu-codex.env
+exported environment variables
+```
+
 ## Verify
 
 ```bash
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor --env .env
+```
+
+If global credentials are configured:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor
 ```
 
 Read a Feishu Wiki or Docx link:

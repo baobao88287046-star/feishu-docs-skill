@@ -25,6 +25,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 API_BASE = "https://open.feishu.cn/open-apis"
+DEFAULT_ENV_FILES = [
+    ".env",
+    os.path.expanduser("~/.codex/secrets/feishu-docs.env"),
+    os.path.expanduser("~/.feishu-codex.env"),
+]
 
 
 class FeishuError(RuntimeError):
@@ -46,6 +51,17 @@ def load_env_file(path: Optional[str]) -> None:
             value = value.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
+
+
+def load_credentials_env(path: Optional[str]) -> Optional[str]:
+    if path:
+        load_env_file(path)
+        return path
+    for candidate in DEFAULT_ENV_FILES:
+        if os.path.exists(candidate):
+            load_env_file(candidate)
+            return candidate
+    return None
 
 
 def first_env(names: Iterable[str]) -> Optional[str]:
@@ -888,7 +904,7 @@ def extract_document_id(create_response: Dict[str, Any]) -> str:
 
 
 def command_doctor(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     data = tenant_access_token()
     output = dict(data)
     if "tenant_access_token" in output:
@@ -898,7 +914,7 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 
 def command_resolve_url(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     data = resolve_url(args.url, token)
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -906,7 +922,7 @@ def command_resolve_url(args: argparse.Namespace) -> int:
 
 
 def command_read_url(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     resolved = resolve_url(args.url, token)
     if resolved.get("code") != 0:
@@ -942,7 +958,7 @@ def command_read_url(args: argparse.Namespace) -> int:
 
 
 def command_create_docx(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     data = create_docx(args.title, token, folder_token=args.folder_token)
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -950,7 +966,7 @@ def command_create_docx(args: argparse.Namespace) -> int:
 
 
 def command_append_docx_md(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     with open(args.markdown, "r", encoding="utf-8") as fh:
         markdown = fh.read()
@@ -985,7 +1001,7 @@ def create_docx_from_markdown(
 
 
 def command_roundtrip_docx(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     if args.markdown:
         with open(args.markdown, "r", encoding="utf-8") as fh:
@@ -1048,7 +1064,7 @@ def command_roundtrip_docx(args: argparse.Namespace) -> int:
 
 
 def command_write_prd_md(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     with open(args.markdown, "r", encoding="utf-8") as fh:
         markdown = fh.read()
@@ -1071,7 +1087,7 @@ def command_write_prd_md(args: argparse.Namespace) -> int:
 
 
 def command_write_doc_md(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     with open(args.markdown, "r", encoding="utf-8") as fh:
         markdown = fh.read()
@@ -1094,7 +1110,7 @@ def command_write_doc_md(args: argparse.Namespace) -> int:
 
 
 def command_roundtrip_prd(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     temp_dir = tempfile.mkdtemp(prefix="feishu-docs-prd-")
     image_path = args.image
@@ -1157,7 +1173,7 @@ def command_roundtrip_prd(args: argparse.Namespace) -> int:
 
 
 def command_roundtrip_media(args: argparse.Namespace) -> int:
-    load_env_file(args.env)
+    load_credentials_env(args.env)
     token = get_token_or_raise()
     title = args.title
     create_response = create_docx(title, token, folder_token=args.folder_token)
