@@ -17,6 +17,7 @@ Use the bundled helper for repeatable API calls:
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py resolve-url 'https://xxx.feishu.cn/wiki/...' --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py read-url 'https://xxx.feishu.cn/wiki/...' --env .env --format text
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env
 ```
 
 Credential env names accepted by the helper:
@@ -79,9 +80,25 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py read-url 'https://xxx
 
 Use JSON when preserving block IDs or formatting details matters.
 
+### Validate Long Docx Writes
+
+Use `roundtrip-docx` before trusting long-document generation. It creates a test Docx, writes generated or provided Markdown in chunks, reads the document back, normalizes text, and diffs expected vs. actual output.
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env --sections 20 --paragraphs-per-section 5 --chunk-size 12 --output-dir /tmp/feishu-docs-roundtrip
+```
+
+The command should report `matched: true`. If it fails, inspect `expected.txt`, `actual.txt`, and `source.md` in the output directory.
+
+For a custom fixture:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env --markdown tests/fixtures/long_doc.md --output-dir /tmp/feishu-docs-roundtrip
+```
+
 ## Bitable Notes
 
-This first version focuses on credential checks, URL resolution, and Docx reads. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
+This first version supports credential checks, URL resolution, Docx reads, Docx Markdown-subset appends, and Docx roundtrip validation. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
 
 When implementing Bitable writes:
 
@@ -104,4 +121,3 @@ High-signal checks:
 - After changing scopes, create and publish a new app version.
 - The target document or Bitable must add the enterprise app as a document app/collaborator.
 - Re-fetch `tenant_access_token` after permission changes.
-

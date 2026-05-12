@@ -40,6 +40,20 @@ Read a Feishu Wiki or Docx link:
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py read-url 'https://xxx.feishu.cn/wiki/xxx' --env .env --format text
 ```
 
+Validate long Docx writing:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env --sections 20 --paragraphs-per-section 5 --chunk-size 12 --output-dir /tmp/feishu-docs-roundtrip
+```
+
+The validation command creates a test document, writes generated Markdown content in chunks, reads it back, and diffs expected vs. actual normalized text. A healthy run reports:
+
+```json
+{
+  "matched": true
+}
+```
+
 ## Feishu Requirements
 
 The enterprise app must have the required API scopes and the target document must add the app as a document app/collaborator.
@@ -55,4 +69,3 @@ references/permissions.md
 ```text
 Use $feishu-docs to read this Feishu document link and summarize it: https://...
 ```
-

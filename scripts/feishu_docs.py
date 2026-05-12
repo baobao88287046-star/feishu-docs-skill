@@ -8,10 +8,13 @@ environment variables or a simple KEY=VALUE env file.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -164,6 +167,177 @@ def docx_blocks(docx_token: str, token: str, page_size: int = 50, page_token: Op
     )
 
 
+def create_docx(title: str, token: str, folder_token: Optional[str] = None) -> Dict[str, Any]:
+    body: Dict[str, Any] = {"title": title}
+    if folder_token:
+        body["folder_token"] = folder_token
+    return request_json("POST", "/docx/v1/documents", token=token, body=body)
+
+
+def create_docx_children(
+    docx_token: str,
+    parent_block_id: str,
+    token: str,
+    children: List[Dict[str, Any]],
+    index: int,
+) -> Dict[str, Any]:
+    return request_json(
+        "POST",
+        f"/docx/v1/documents/{docx_token}/blocks/{parent_block_id}/children",
+        token=token,
+        query={"document_revision_id": -1},
+        body={"children": children, "index": index},
+    )
+
+
+def all_docx_blocks(docx_token: str, token: str, page_size: int = 100) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    page_token: Optional[str] = None
+    while True:
+        data = docx_blocks(docx_token, token, page_size=page_size, page_token=page_token)
+        if data.get("code") != 0:
+            raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+        chunk = data.get("data", {}).get("items", [])
+        items.extend(chunk)
+        if not data.get("data", {}).get("has_more"):
+            break
+        page_token = data.get("data", {}).get("page_token")
+        if not page_token:
+            break
+        time.sleep(0.25)
+    return items
+
+
+def text_element(content: str) -> Dict[str, Any]:
+    return {
+        "text_run": {
+            "content": content,
+            "text_element_style": {
+                "bold": False,
+                "italic": False,
+                "strikethrough": False,
+                "underline": False,
+                "inline_code": False,
+            },
+        }
+    }
+
+
+def text_block(block_key: str, block_type: int, content: str) -> Dict[str, Any]:
+    return {
+        "block_type": block_type,
+        block_key: {
+            "elements": [text_element(content)],
+            "style": {"align": 1, "folded": False},
+        },
+    }
+
+
+def markdown_to_docx_blocks(markdown: str) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    in_code = False
+    code_lines: List[str] = []
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        if code_lines:
+            blocks.append(text_block("code", 14, "\n".join(code_lines)))
+            code_lines = []
+
+    for raw_line in markdown.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                in_code = True
+                code_lines = []
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        if not stripped:
+            continue
+        if stripped.startswith("### "):
+            blocks.append(text_block("heading3", 5, stripped[4:]))
+        elif stripped.startswith("## "):
+            blocks.append(text_block("heading2", 4, stripped[3:]))
+        elif stripped.startswith("# "):
+            blocks.append(text_block("heading1", 3, stripped[2:]))
+        elif stripped.startswith("- "):
+            blocks.append(text_block("bullet", 12, stripped[2:]))
+        elif re.match(r"^\d+\.\s+", stripped):
+            blocks.append(text_block("ordered", 13, re.sub(r"^\d+\.\s+", "", stripped)))
+        elif stripped.startswith("> "):
+            blocks.append(text_block("quote", 15, stripped[2:]))
+        else:
+            blocks.append(text_block("text", 2, stripped))
+    if in_code:
+        flush_code()
+    return blocks
+
+
+def normalize_markdown_text(markdown: str) -> str:
+    lines: List[str] = []
+    in_code = False
+    for raw_line in markdown.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            continue
+        if not stripped:
+            continue
+        if not in_code:
+            stripped = re.sub(r"^#{1,9}\s+", "", stripped)
+            stripped = re.sub(r"^[-*]\s+", "", stripped)
+            stripped = re.sub(r"^\d+\.\s+", "", stripped)
+            stripped = re.sub(r"^>\s+", "", stripped)
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def generated_fixture(sections: int, paragraphs_per_section: int) -> str:
+    lines = [
+        "# Feishu Roundtrip Validation",
+        "这是一份由 feishu-docs skill 自动生成的长文档写入验证材料。",
+        "The purpose is to detect ordering, truncation, and block conversion issues.",
+    ]
+    for section in range(1, sections + 1):
+        lines.append("")
+        lines.append(f"## Section {section:02d} 标题")
+        for paragraph in range(1, paragraphs_per_section + 1):
+            marker = f"S{section:02d}-P{paragraph:02d}"
+            lines.append(
+                f"{marker} 正文段落：用于检查长文档写入后的顺序、中文字符、English words, numbers {section * paragraph}, and URL https://example.com/{marker}."
+            )
+        lines.append(f"- S{section:02d}-B01 bullet item alpha")
+        lines.append(f"- S{section:02d}-B02 bullet item beta")
+        lines.append(f"1. S{section:02d}-O01 ordered item one")
+        lines.append(f"2. S{section:02d}-O02 ordered item two")
+    return "\n".join(lines) + "\n"
+
+
+def write_blocks_in_chunks(
+    docx_token: str,
+    token: str,
+    blocks: List[Dict[str, Any]],
+    chunk_size: int,
+) -> int:
+    index = 0
+    written = 0
+    for start in range(0, len(blocks), chunk_size):
+        chunk = blocks[start : start + chunk_size]
+        data = create_docx_children(docx_token, docx_token, token, chunk, index=index)
+        if data.get("code") != 0:
+            raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+        written += len(chunk)
+        index += len(chunk)
+        time.sleep(0.4)
+    return written
+
+
 def element_text(elements: List[Dict[str, Any]]) -> str:
     chunks: List[str] = []
     for element in elements or []:
@@ -207,6 +381,20 @@ def blocks_to_text(items: List[Dict[str, Any]]) -> str:
         if text:
             lines.append(text)
     return "\n".join(lines)
+
+
+def extract_document_id(create_response: Dict[str, Any]) -> str:
+    data = create_response.get("data", {})
+    document = data.get("document", {})
+    doc_id = (
+        document.get("document_id")
+        or document.get("document_token")
+        or data.get("document_id")
+        or data.get("document_token")
+    )
+    if not doc_id:
+        raise FeishuError(f"cannot find document id in response: {json.dumps(create_response, ensure_ascii=False)}")
+    return doc_id
 
 
 def command_doctor(args: argparse.Namespace) -> int:
@@ -263,6 +451,81 @@ def command_read_url(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_create_docx(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    data = create_docx(args.title, token, folder_token=args.folder_token)
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0 if data.get("code") == 0 else 1
+
+
+def command_append_docx_md(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    with open(args.markdown, "r", encoding="utf-8") as fh:
+        markdown = fh.read()
+    blocks = markdown_to_docx_blocks(markdown)
+    written = write_blocks_in_chunks(args.docx_token, token, blocks, chunk_size=args.chunk_size)
+    print(json.dumps({"code": 0, "written_blocks": written, "docx_token": args.docx_token}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_roundtrip_docx(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    if args.markdown:
+        with open(args.markdown, "r", encoding="utf-8") as fh:
+            markdown = fh.read()
+    else:
+        markdown = generated_fixture(args.sections, args.paragraphs_per_section)
+
+    expected = normalize_markdown_text(markdown)
+    blocks = markdown_to_docx_blocks(markdown)
+    create_response = create_docx(args.title, token, folder_token=args.folder_token)
+    if create_response.get("code") != 0:
+        print(json.dumps(create_response, ensure_ascii=False, indent=2))
+        return 1
+    docx_token = extract_document_id(create_response)
+    written = write_blocks_in_chunks(docx_token, token, blocks, chunk_size=args.chunk_size)
+    time.sleep(args.settle_seconds)
+    actual_blocks = all_docx_blocks(docx_token, token, page_size=100)
+    # Skip the root page block title; compare inserted content only.
+    actual = blocks_to_text([block for block in actual_blocks if block.get("block_id") != docx_token])
+
+    diff = list(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="expected",
+            tofile="actual",
+            lineterm="",
+        )
+    )
+    result = {
+        "code": 0 if not diff else 1,
+        "docx_token": docx_token,
+        "title": args.title,
+        "expected_lines": len(expected.splitlines()),
+        "actual_lines": len(actual.splitlines()),
+        "planned_blocks": len(blocks),
+        "written_blocks": written,
+        "read_blocks": len(actual_blocks),
+        "matched": not diff,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if diff:
+        print("\n".join(diff[: args.max_diff_lines]))
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(os.path.join(args.output_dir, "expected.txt"), "w", encoding="utf-8") as fh:
+            fh.write(expected + "\n")
+        with open(os.path.join(args.output_dir, "actual.txt"), "w", encoding="utf-8") as fh:
+            fh.write(actual + "\n")
+        with open(os.path.join(args.output_dir, "source.md"), "w", encoding="utf-8") as fh:
+            fh.write(markdown)
+    return 0 if not diff else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Feishu/Lark Docs helper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -282,6 +545,32 @@ def build_parser() -> argparse.ArgumentParser:
     read.add_argument("--format", choices=["text", "json"], default="text")
     read.add_argument("--page-size", type=int, default=50)
     read.set_defaults(func=command_read_url)
+
+    create = subparsers.add_parser("create-docx", help="create a blank Docx document")
+    create.add_argument("title")
+    create.add_argument("--env", help="optional env file")
+    create.add_argument("--folder-token", help="optional destination folder token")
+    create.set_defaults(func=command_create_docx)
+
+    append = subparsers.add_parser("append-docx-md", help="append a Markdown subset to an existing Docx document")
+    append.add_argument("docx_token")
+    append.add_argument("markdown")
+    append.add_argument("--env", help="optional env file")
+    append.add_argument("--chunk-size", type=int, default=20)
+    append.set_defaults(func=command_append_docx_md)
+
+    roundtrip = subparsers.add_parser("roundtrip-docx", help="create, write, read back, and diff a Docx test document")
+    roundtrip.add_argument("--env", help="optional env file")
+    roundtrip.add_argument("--title", default="feishu-docs roundtrip validation")
+    roundtrip.add_argument("--folder-token", help="optional destination folder token")
+    roundtrip.add_argument("--markdown", help="optional Markdown fixture; generated when omitted")
+    roundtrip.add_argument("--sections", type=int, default=8)
+    roundtrip.add_argument("--paragraphs-per-section", type=int, default=4)
+    roundtrip.add_argument("--chunk-size", type=int, default=20)
+    roundtrip.add_argument("--settle-seconds", type=float, default=1.5)
+    roundtrip.add_argument("--max-diff-lines", type=int, default=120)
+    roundtrip.add_argument("--output-dir", help="write source/expected/actual comparison files")
+    roundtrip.set_defaults(func=command_roundtrip_docx)
 
     return parser
 
