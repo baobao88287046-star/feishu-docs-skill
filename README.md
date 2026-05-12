@@ -68,27 +68,35 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env
 
 The media validation command creates a test document, inserts a table, fills table cells, inserts an image block, uploads image media, binds it to the block, reads the document back, and verifies both table and image structure.
 
-## PRD Publishing
+## Markdown Document Publishing
 
-Create a Feishu Docx from PRD Markdown:
+Create a Feishu Docx from Markdown:
 
 ```bash
-python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-prd-md ./prd.md --env .env
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./document.md --env .env
 ```
 
-Validate the PRD path:
+The default `--table-mode auto` chooses table handling from the document content. Small/few tables use native Feishu tables. Many or large tables use stable aligned text rows.
+
+Validate the document-writing path:
 
 ```bash
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-prd --env .env
 ```
 
-Default PRD table mode is `text`, which writes Markdown tables as aligned text rows. This is the recommended stable mode for long PRDs. For small PRDs that require editable native Feishu table cells:
+Force native Feishu table cells:
 
 ```bash
-python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-prd-md ./prd.md --env .env --table-mode native
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./document.md --env .env --table-mode native
 ```
 
-Native tables are validated, but large documents with many native tables require many API calls and may hit Feishu connection instability.
+Force stable text tables:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./document.md --env .env --table-mode text
+```
+
+`write-prd-md` remains available as a compatibility alias, but the recommended entry point is `write-doc-md`.
 
 ## Feishu Requirements
 

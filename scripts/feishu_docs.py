@@ -508,6 +508,37 @@ def parse_markdown_table(lines: List[str], start: int) -> Optional[Tuple[List[Li
     return rows, idx
 
 
+def markdown_table_stats(markdown: str) -> Dict[str, int]:
+    lines = markdown.splitlines()
+    idx = 0
+    tables = 0
+    total_cells = 0
+    max_cells = 0
+    while idx < len(lines):
+        table = parse_markdown_table(lines, idx)
+        if not table:
+            idx += 1
+            continue
+        rows, next_idx = table
+        cells = sum(len(row) for row in rows)
+        tables += 1
+        total_cells += cells
+        max_cells = max(max_cells, cells)
+        idx = next_idx
+    return {"tables": tables, "total_cells": total_cells, "max_cells": max_cells}
+
+
+def choose_table_mode(markdown: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    stats = markdown_table_stats(markdown)
+    # Native Feishu tables are best for small, editable tables. Larger or many
+    # tables require many non-idempotent cell writes, so text mode is safer.
+    if stats["tables"] <= 2 and stats["total_cells"] <= 36 and stats["max_cells"] <= 24:
+        return "native"
+    return "text"
+
+
 def markdown_to_ops(markdown: str, base_dir: Optional[str] = None, table_mode: str = "native") -> List[Dict[str, Any]]:
     ops: List[Dict[str, Any]] = []
     lines = markdown.splitlines()
@@ -946,8 +977,10 @@ def create_docx_from_markdown(
     if create_response.get("code") != 0:
         raise FeishuError(json.dumps(create_response, ensure_ascii=False, indent=2))
     docx_token = extract_document_id(create_response)
-    ops = markdown_to_ops(markdown, base_dir=base_dir, table_mode=table_mode)
+    resolved_table_mode = choose_table_mode(markdown, table_mode)
+    ops = markdown_to_ops(markdown, base_dir=base_dir, table_mode=resolved_table_mode)
     stats = write_ops_in_order(docx_token, token, ops, chunk_size=chunk_size)
+    stats["table_mode"] = resolved_table_mode
     return docx_token, stats
 
 
@@ -960,7 +993,8 @@ def command_roundtrip_docx(args: argparse.Namespace) -> int:
     else:
         markdown = generated_fixture(args.sections, args.paragraphs_per_section)
 
-    expected = strip_trailing_ws(normalize_markdown_text(markdown, table_mode=args.table_mode))
+    resolved_table_mode = choose_table_mode(markdown, args.table_mode)
+    expected = strip_trailing_ws(normalize_markdown_text(markdown, table_mode=resolved_table_mode))
     base_dir = os.path.dirname(os.path.abspath(args.markdown)) if args.markdown else None
     try:
         docx_token, stats = create_docx_from_markdown(
@@ -1036,6 +1070,29 @@ def command_write_prd_md(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_write_doc_md(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    with open(args.markdown, "r", encoding="utf-8") as fh:
+        markdown = fh.read()
+    base_dir = os.path.dirname(os.path.abspath(args.markdown))
+    title = args.title
+    if not title:
+        first_heading = next((line.strip()[2:].strip() for line in markdown.splitlines() if line.strip().startswith("# ")), None)
+        title = first_heading or os.path.splitext(os.path.basename(args.markdown))[0]
+    docx_token, stats = create_docx_from_markdown(
+        markdown,
+        token,
+        title=title,
+        folder_token=args.folder_token,
+        base_dir=base_dir,
+        chunk_size=args.chunk_size,
+        table_mode=args.table_mode,
+    )
+    print(json.dumps({"code": 0, "docx_token": docx_token, "title": title, **stats}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def command_roundtrip_prd(args: argparse.Namespace) -> int:
     load_env_file(args.env)
     token = get_token_or_raise()
@@ -1045,7 +1102,8 @@ def command_roundtrip_prd(args: argparse.Namespace) -> int:
         image_path = os.path.join(temp_dir, "prd-diagram.png")
         write_sample_png(image_path)
     markdown = generated_prd_fixture(image_path=image_path, sections=args.sections)
-    expected = strip_trailing_ws(normalize_markdown_text(markdown, table_mode=args.table_mode))
+    resolved_table_mode = choose_table_mode(markdown, args.table_mode)
+    expected = strip_trailing_ws(normalize_markdown_text(markdown, table_mode=resolved_table_mode))
     docx_token, stats = create_docx_from_markdown(
         markdown,
         token,
@@ -1069,7 +1127,7 @@ def command_roundtrip_prd(args: argparse.Namespace) -> int:
     )
     image_blocks = [block for block in actual_blocks if block.get("image")]
     table_blocks = [block for block in actual_blocks if block.get("table")]
-    expected_table_blocks = stats["tables"] if args.table_mode == "native" else 0
+    expected_table_blocks = stats["tables"] if stats["table_mode"] == "native" else 0
     result = {
         "code": 0 if not diff and image_blocks and len(table_blocks) == expected_table_blocks else 1,
         "docx_token": docx_token,
@@ -1081,7 +1139,7 @@ def command_roundtrip_prd(args: argparse.Namespace) -> int:
         "table_blocks": len(table_blocks),
         "image_blocks": len(image_blocks),
         "text_matched": not diff,
-        "table_mode": args.table_mode,
+        "table_mode": stats["table_mode"],
         "matched": bool(not diff and image_blocks and len(table_blocks) == expected_table_blocks),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1193,8 +1251,17 @@ def build_parser() -> argparse.ArgumentParser:
     append.add_argument("markdown")
     append.add_argument("--env", help="optional env file")
     append.add_argument("--chunk-size", type=int, default=20)
-    append.add_argument("--table-mode", choices=["native", "text"], default="native")
+    append.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
     append.set_defaults(func=command_append_docx_md)
+
+    write_doc = subparsers.add_parser("write-doc-md", help="create a Docx document from Markdown with automatic content-based handling")
+    write_doc.add_argument("markdown")
+    write_doc.add_argument("--env", help="optional env file")
+    write_doc.add_argument("--title", help="document title; defaults to first H1 or filename")
+    write_doc.add_argument("--folder-token", help="optional destination folder token")
+    write_doc.add_argument("--chunk-size", type=int, default=20)
+    write_doc.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
+    write_doc.set_defaults(func=command_write_doc_md)
 
     write_prd = subparsers.add_parser("write-prd-md", help="create a Docx document from PRD Markdown with tables and local images")
     write_prd.add_argument("markdown")
@@ -1202,7 +1269,7 @@ def build_parser() -> argparse.ArgumentParser:
     write_prd.add_argument("--title", help="document title; defaults to first H1 or filename")
     write_prd.add_argument("--folder-token", help="optional destination folder token")
     write_prd.add_argument("--chunk-size", type=int, default=20)
-    write_prd.add_argument("--table-mode", choices=["native", "text"], default="text")
+    write_prd.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
     write_prd.set_defaults(func=command_write_prd_md)
 
     roundtrip = subparsers.add_parser("roundtrip-docx", help="create, write, read back, and diff a Docx test document")
@@ -1213,7 +1280,7 @@ def build_parser() -> argparse.ArgumentParser:
     roundtrip.add_argument("--sections", type=int, default=8)
     roundtrip.add_argument("--paragraphs-per-section", type=int, default=4)
     roundtrip.add_argument("--chunk-size", type=int, default=20)
-    roundtrip.add_argument("--table-mode", choices=["native", "text"], default="native")
+    roundtrip.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
     roundtrip.add_argument("--settle-seconds", type=float, default=1.5)
     roundtrip.add_argument("--max-diff-lines", type=int, default=120)
     roundtrip.add_argument("--output-dir", help="write source/expected/actual comparison files")
@@ -1234,7 +1301,7 @@ def build_parser() -> argparse.ArgumentParser:
     prd.add_argument("--image", help="optional local image path; a tiny PNG is generated when omitted")
     prd.add_argument("--sections", type=int, default=6)
     prd.add_argument("--chunk-size", type=int, default=16)
-    prd.add_argument("--table-mode", choices=["native", "text"], default="text")
+    prd.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
     prd.add_argument("--settle-seconds", type=float, default=2.0)
     prd.add_argument("--max-diff-lines", type=int, default=160)
     prd.add_argument("--output-dir", help="write source/expected/actual comparison files")
