@@ -68,6 +68,28 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env
 
 The media validation command creates a test document, inserts a table, fills table cells, inserts an image block, uploads image media, binds it to the block, reads the document back, and verifies both table and image structure.
 
+## PRD Publishing
+
+Create a Feishu Docx from PRD Markdown:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-prd-md ./prd.md --env .env
+```
+
+Validate the PRD path:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-prd --env .env
+```
+
+Default PRD table mode is `text`, which writes Markdown tables as aligned text rows. This is the recommended stable mode for long PRDs. For small PRDs that require editable native Feishu table cells:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-prd-md ./prd.md --env .env --table-mode native
+```
+
+Native tables are validated, but large documents with many native tables require many API calls and may hit Feishu connection instability.
+
 ## Feishu Requirements
 
 The enterprise app must have the required API scopes and the target document must add the app as a document app/collaborator.

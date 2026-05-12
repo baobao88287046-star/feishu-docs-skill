@@ -17,6 +17,7 @@ import re
 import sys
 import tempfile
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,15 +86,28 @@ def request_json(
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
-    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            payload = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        payload = exc.read().decode("utf-8", errors="replace")
-        raise FeishuError(f"HTTP {exc.code}: {payload}") from exc
-    except urllib.error.URLError as exc:
-        raise FeishuError(f"network error: {exc}") from exc
+    payload = ""
+    method_upper = method.upper()
+    # Avoid retrying non-idempotent writes. If a create-child request succeeds
+    # server-side but the connection drops, retrying can duplicate document blocks.
+    max_attempts = 3 if method_upper == "GET" or path_or_url.endswith("/tenant_access_token/internal") else 1
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(url, data=data, headers=headers, method=method_upper)
+        try:
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                payload = resp.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="replace")
+            if exc.code in (429, 500, 502, 503, 504) and attempt < max_attempts:
+                time.sleep(1.5 * attempt)
+                continue
+            raise FeishuError(f"HTTP {exc.code}: {payload}") from exc
+        except (urllib.error.URLError, http.client.RemoteDisconnected) as exc:
+            if attempt < max_attempts:
+                time.sleep(1.5 * attempt)
+                continue
+            raise FeishuError(f"network error: {exc}") from exc
 
     try:
         return json.loads(payload)
@@ -338,8 +352,9 @@ def create_table_with_values(
         data = create_docx_children(docx_token, cell_id, token, [cell_block], index=0)
         if data.get("code") != 0:
             raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+        time.sleep(0.12)
         if idx and idx % 8 == 0:
-            time.sleep(0.4)
+            time.sleep(0.6)
     return {"table_id": table_id, "cells": cells, "values": values}
 
 
@@ -429,7 +444,7 @@ def markdown_to_docx_blocks(markdown: str) -> List[Dict[str, Any]]:
     def flush_code() -> None:
         nonlocal code_lines
         if code_lines:
-            blocks.append(text_block("code", 14, "\n".join(code_lines)))
+            blocks.append(text_block("text", 2, "\n".join(code_lines)))
             code_lines = []
 
     for raw_line in markdown.splitlines():
@@ -459,7 +474,7 @@ def markdown_to_docx_blocks(markdown: str) -> List[Dict[str, Any]]:
         elif re.match(r"^\d+\.\s+", stripped):
             blocks.append(text_block("ordered", 13, re.sub(r"^\d+\.\s+", "", stripped)))
         elif stripped.startswith("> "):
-            blocks.append(text_block("quote", 15, stripped[2:]))
+            blocks.append(text_block("text", 2, f"引用：{stripped[2:]}"))
         else:
             blocks.append(text_block("text", 2, stripped))
     if in_code:
@@ -467,23 +482,225 @@ def markdown_to_docx_blocks(markdown: str) -> List[Dict[str, Any]]:
     return blocks
 
 
-def normalize_markdown_text(markdown: str) -> str:
+def is_markdown_table_separator(line: str) -> bool:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return bool(cells) and all(re.match(r"^:?-{3,}:?$", cell or "") for cell in cells)
+
+
+def parse_markdown_table(lines: List[str], start: int) -> Optional[Tuple[List[List[str]], int]]:
+    if start + 1 >= len(lines):
+        return None
+    header = lines[start].strip()
+    separator = lines[start + 1].strip()
+    if "|" not in header or not is_markdown_table_separator(separator):
+        return None
+    rows: List[List[str]] = [[cell.strip() for cell in header.strip("|").split("|")]]
+    idx = start + 2
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if not stripped or "|" not in stripped:
+            break
+        rows.append([cell.strip() for cell in stripped.strip("|").split("|")])
+        idx += 1
+    return rows, idx
+
+
+def markdown_to_ops(markdown: str, base_dir: Optional[str] = None, table_mode: str = "native") -> List[Dict[str, Any]]:
+    ops: List[Dict[str, Any]] = []
+    lines = markdown.splitlines()
+    idx = 0
+    in_code = False
+    code_lines: List[str] = []
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        if code_lines:
+            ops.append({"type": "block", "block": text_block("text", 2, "\n".join(code_lines))})
+            code_lines = []
+
+    while idx < len(lines):
+        line = lines[idx].rstrip()
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                in_code = True
+                code_lines = []
+            idx += 1
+            continue
+        if in_code:
+            code_lines.append(line)
+            idx += 1
+            continue
+        if not stripped:
+            idx += 1
+            continue
+
+        table = parse_markdown_table(lines, idx)
+        if table:
+            rows, next_idx = table
+            if table_mode == "native":
+                ops.append({"type": "table", "values": rows})
+            elif table_mode == "text":
+                widths = [0] * max((len(row) for row in rows), default=0)
+                for row in rows:
+                    for col_idx, cell in enumerate(row):
+                        widths[col_idx] = max(widths[col_idx], len(cell))
+                for row in rows:
+                    padded = [cell.ljust(widths[col_idx]) for col_idx, cell in enumerate(row)]
+                    ops.append({"type": "block", "block": text_block("text", 2, " | ".join(padded))})
+            else:
+                raise FeishuError(f"unknown table mode: {table_mode}")
+            idx = next_idx
+            continue
+
+        image_match = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", stripped)
+        if image_match:
+            alt = image_match.group(1).strip()
+            image_path = image_match.group(2).strip().strip('"').strip("'")
+            if base_dir and not urllib.parse.urlparse(image_path).scheme and not os.path.isabs(image_path):
+                image_path = os.path.join(base_dir, image_path)
+            ops.append({"type": "image", "path": image_path, "alt": alt})
+            if alt:
+                ops.append({"type": "block", "block": text_block("text", 2, f"图：{alt}")})
+            idx += 1
+            continue
+
+        if stripped.startswith("### "):
+            block = text_block("heading3", 5, stripped[4:])
+        elif stripped.startswith("## "):
+            block = text_block("heading2", 4, stripped[3:])
+        elif stripped.startswith("# "):
+            block = text_block("heading1", 3, stripped[2:])
+        elif stripped.startswith("- [ ] ") or stripped.startswith("- [x] ") or stripped.startswith("- [X] "):
+            block = text_block("bullet", 12, stripped[2:])
+        elif stripped.startswith("- "):
+            block = text_block("bullet", 12, stripped[2:])
+        elif re.match(r"^\d+\.\s+", stripped):
+            block = text_block("ordered", 13, re.sub(r"^\d+\.\s+", "", stripped))
+        elif stripped.startswith("> "):
+            block = text_block("text", 2, f"引用：{stripped[2:]}")
+        else:
+            block = text_block("text", 2, stripped)
+        ops.append({"type": "block", "block": block})
+        idx += 1
+    if in_code:
+        flush_code()
+    return ops
+
+
+def write_ops_in_order(
+    docx_token: str,
+    token: str,
+    ops: List[Dict[str, Any]],
+    chunk_size: int,
+) -> Dict[str, int]:
+    index = 0
+    written_blocks = 0
+    table_count = 0
+    image_count = 0
+    pending_blocks: List[Dict[str, Any]] = []
+
+    def flush_blocks() -> None:
+        nonlocal index, written_blocks, pending_blocks
+        while pending_blocks:
+            chunk = pending_blocks[:chunk_size]
+            del pending_blocks[:chunk_size]
+            data = create_docx_children(docx_token, docx_token, token, chunk, index=index)
+            if data.get("code") != 0:
+                raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+            index += len(chunk)
+            written_blocks += len(chunk)
+            time.sleep(0.35)
+
+    for op in ops:
+        op_type = op.get("type")
+        if op_type == "block":
+            pending_blocks.append(op["block"])
+            if len(pending_blocks) >= chunk_size:
+                flush_blocks()
+        elif op_type == "table":
+            flush_blocks()
+            create_table_with_values(docx_token, token, op["values"], index=index)
+            index += 1
+            table_count += 1
+        elif op_type == "image":
+            flush_blocks()
+            image_path = op["path"]
+            if urllib.parse.urlparse(image_path).scheme:
+                raise FeishuError("remote image URLs are not supported yet; download the image locally first")
+            if not os.path.exists(image_path):
+                raise FeishuError(f"image file not found: {image_path}")
+            create_image_block_with_file(docx_token, token, image_path, index=index)
+            index += 1
+            image_count += 1
+        else:
+            raise FeishuError(f"unknown markdown op type: {op_type}")
+    flush_blocks()
+    return {"top_level_blocks": index, "written_text_blocks": written_blocks, "tables": table_count, "images": image_count}
+
+
+def normalize_markdown_text(markdown: str, table_mode: str = "native") -> str:
     lines: List[str] = []
     in_code = False
-    for raw_line in markdown.splitlines():
+    raw_lines = markdown.splitlines()
+    idx = 0
+    while idx < len(raw_lines):
+        raw_line = raw_lines[idx]
         stripped = raw_line.strip()
         if stripped.startswith("```"):
             in_code = not in_code
+            idx += 1
             continue
         if not stripped:
+            idx += 1
+            continue
+        table = None if in_code else parse_markdown_table(raw_lines, idx)
+        if table:
+            rows, next_idx = table
+            if table_mode == "native":
+                for row in rows:
+                    lines.extend(cell for cell in row if cell)
+            elif table_mode == "text":
+                widths = [0] * max((len(row) for row in rows), default=0)
+                for row in rows:
+                    for col_idx, cell in enumerate(row):
+                        widths[col_idx] = max(widths[col_idx], len(cell))
+                for row in rows:
+                    padded = [cell.ljust(widths[col_idx]) for col_idx, cell in enumerate(row)]
+                    lines.append(" | ".join(padded).rstrip())
+            else:
+                raise FeishuError(f"unknown table mode: {table_mode}")
+            idx = next_idx
+            continue
+        image_match = None if in_code else re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", stripped)
+        if image_match:
+            alt = image_match.group(1).strip()
+            if alt:
+                lines.append(f"图：{alt}")
+            idx += 1
             continue
         if not in_code:
-            stripped = re.sub(r"^#{1,9}\s+", "", stripped)
-            stripped = re.sub(r"^[-*]\s+", "", stripped)
-            stripped = re.sub(r"^\d+\.\s+", "", stripped)
-            stripped = re.sub(r"^>\s+", "", stripped)
+            heading_match = re.match(r"^#{1,9}\s+(.+)$", stripped)
+            if heading_match:
+                stripped = heading_match.group(1)
+            elif stripped.startswith("> "):
+                stripped = f"引用：{stripped[2:]}"
+            else:
+                stripped = re.sub(r"^[-*]\s+", "", stripped)
+                stripped = re.sub(r"^\d+\.\s+", "", stripped)
         lines.append(stripped)
+        idx += 1
     return "\n".join(lines)
+
+
+def strip_trailing_ws(text: str) -> str:
+    return "\n".join(line.rstrip() for line in text.splitlines())
 
 
 def generated_fixture(sections: int, paragraphs_per_section: int) -> str:
@@ -504,6 +721,60 @@ def generated_fixture(sections: int, paragraphs_per_section: int) -> str:
         lines.append(f"- S{section:02d}-B02 bullet item beta")
         lines.append(f"1. S{section:02d}-O01 ordered item one")
         lines.append(f"2. S{section:02d}-O02 ordered item two")
+    return "\n".join(lines) + "\n"
+
+
+def generated_prd_fixture(image_path: str, sections: int = 6) -> str:
+    lines = [
+        "# 智能批改工作台 PRD",
+        "## 1. 背景与目标",
+        "当前教研与运营团队需要一个稳定的工作台来管理批改任务、查看风险、追踪转化线索。",
+        "- [ ] 明确 MVP 范围",
+        "- [x] 对齐核心数据指标",
+        "## 2. 用户与场景",
+        "| 角色 | 核心诉求 | 高频动作 |",
+        "| --- | --- | --- |",
+        "| 教师 | 快速定位待处理作业 | 批改、备注、反馈 |",
+        "| 教研 | 发现共性薄弱点 | 查看统计、调整题单 |",
+        "| 运营 | 识别高意向用户 | 查看转化信号、触达 |",
+        "## 3. 核心流程",
+        "1. 用户提交作业",
+        "2. 系统识别题型与风险",
+        "3. 教师完成批改并生成反馈",
+        "4. 运营查看转化建议",
+        f"![工作台信息架构示意图]({image_path})",
+        "## 4. 指标口径",
+        "| 指标 | 定义 | 目标值 |",
+        "| --- | --- | --- |",
+        "| 首响时长 | 从提交到首次批改动作的时间 | 小于 10 分钟 |",
+        "| 完成率 | 当日完成批改任务 / 当日新任务 | 大于 95% |",
+        "| 反馈采纳率 | 用户查看反馈后的下一步动作比例 | 大于 60% |",
+    ]
+    for section in range(1, sections + 1):
+        lines.extend(
+            [
+                f"## 5.{section} 功能模块 {section}",
+                f"模块 {section} 需要覆盖正常态、空状态、错误态和权限不足状态。",
+                "| 页面区域 | 字段 | 交互 | 验收标准 |",
+                "| --- | --- | --- | --- |",
+                f"| 列表区 | 任务编号 S{section:02d} | 点击进入详情 | 顺序稳定且不丢失 |",
+                f"| 详情区 | 学生反馈 S{section:02d} | 支持编辑保存 | 回读内容一致 |",
+                f"- 风险点 S{section:02d}-A：长文本不要截断",
+                f"- 风险点 S{section:02d}-B：表格不要错列",
+                f"1. 验收步骤 S{section:02d}-1",
+                f"2. 验收步骤 S{section:02d}-2",
+            ]
+        )
+    lines.extend(
+        [
+            "## 6. 非功能要求",
+            "> 所有写入链路必须支持回读校验，避免 PRD 发布后内容错乱。",
+            "```",
+            "status = roundtrip_verify(document)",
+            "assert status.matched is True",
+            "```",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -652,10 +923,32 @@ def command_append_docx_md(args: argparse.Namespace) -> int:
     token = get_token_or_raise()
     with open(args.markdown, "r", encoding="utf-8") as fh:
         markdown = fh.read()
-    blocks = markdown_to_docx_blocks(markdown)
-    written = write_blocks_in_chunks(args.docx_token, token, blocks, chunk_size=args.chunk_size)
-    print(json.dumps({"code": 0, "written_blocks": written, "docx_token": args.docx_token}, ensure_ascii=False, indent=2))
+    ops = markdown_to_ops(
+        markdown,
+        base_dir=os.path.dirname(os.path.abspath(args.markdown)),
+        table_mode=args.table_mode,
+    )
+    stats = write_ops_in_order(args.docx_token, token, ops, chunk_size=args.chunk_size)
+    print(json.dumps({"code": 0, "docx_token": args.docx_token, **stats}, ensure_ascii=False, indent=2))
     return 0
+
+
+def create_docx_from_markdown(
+    markdown: str,
+    token: str,
+    title: str,
+    folder_token: Optional[str],
+    base_dir: Optional[str],
+    chunk_size: int,
+    table_mode: str = "native",
+) -> Tuple[str, Dict[str, int]]:
+    create_response = create_docx(title, token, folder_token=folder_token)
+    if create_response.get("code") != 0:
+        raise FeishuError(json.dumps(create_response, ensure_ascii=False, indent=2))
+    docx_token = extract_document_id(create_response)
+    ops = markdown_to_ops(markdown, base_dir=base_dir, table_mode=table_mode)
+    stats = write_ops_in_order(docx_token, token, ops, chunk_size=chunk_size)
+    return docx_token, stats
 
 
 def command_roundtrip_docx(args: argparse.Namespace) -> int:
@@ -667,18 +960,25 @@ def command_roundtrip_docx(args: argparse.Namespace) -> int:
     else:
         markdown = generated_fixture(args.sections, args.paragraphs_per_section)
 
-    expected = normalize_markdown_text(markdown)
-    blocks = markdown_to_docx_blocks(markdown)
-    create_response = create_docx(args.title, token, folder_token=args.folder_token)
-    if create_response.get("code") != 0:
-        print(json.dumps(create_response, ensure_ascii=False, indent=2))
+    expected = strip_trailing_ws(normalize_markdown_text(markdown, table_mode=args.table_mode))
+    base_dir = os.path.dirname(os.path.abspath(args.markdown)) if args.markdown else None
+    try:
+        docx_token, stats = create_docx_from_markdown(
+            markdown,
+            token,
+            title=args.title,
+            folder_token=args.folder_token,
+            base_dir=base_dir,
+            chunk_size=args.chunk_size,
+            table_mode=args.table_mode,
+        )
+    except FeishuError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    docx_token = extract_document_id(create_response)
-    written = write_blocks_in_chunks(docx_token, token, blocks, chunk_size=args.chunk_size)
     time.sleep(args.settle_seconds)
     actual_blocks = all_docx_blocks(docx_token, token, page_size=100)
     # Skip the root page block title; compare inserted content only.
-    actual = blocks_to_text([block for block in actual_blocks if block.get("block_id") != docx_token])
+    actual = strip_trailing_ws(blocks_to_text([block for block in actual_blocks if block.get("block_id") != docx_token]))
 
     diff = list(
         difflib.unified_diff(
@@ -695,8 +995,7 @@ def command_roundtrip_docx(args: argparse.Namespace) -> int:
         "title": args.title,
         "expected_lines": len(expected.splitlines()),
         "actual_lines": len(actual.splitlines()),
-        "planned_blocks": len(blocks),
-        "written_blocks": written,
+        **stats,
         "read_blocks": len(actual_blocks),
         "matched": not diff,
     }
@@ -712,6 +1011,91 @@ def command_roundtrip_docx(args: argparse.Namespace) -> int:
         with open(os.path.join(args.output_dir, "source.md"), "w", encoding="utf-8") as fh:
             fh.write(markdown)
     return 0 if not diff else 1
+
+
+def command_write_prd_md(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    with open(args.markdown, "r", encoding="utf-8") as fh:
+        markdown = fh.read()
+    base_dir = os.path.dirname(os.path.abspath(args.markdown))
+    title = args.title
+    if not title:
+        first_heading = next((line.strip()[2:].strip() for line in markdown.splitlines() if line.strip().startswith("# ")), None)
+        title = first_heading or os.path.splitext(os.path.basename(args.markdown))[0]
+    docx_token, stats = create_docx_from_markdown(
+        markdown,
+        token,
+        title=title,
+        folder_token=args.folder_token,
+        base_dir=base_dir,
+        chunk_size=args.chunk_size,
+        table_mode=args.table_mode,
+    )
+    print(json.dumps({"code": 0, "docx_token": docx_token, "title": title, **stats}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_roundtrip_prd(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    token = get_token_or_raise()
+    temp_dir = tempfile.mkdtemp(prefix="feishu-docs-prd-")
+    image_path = args.image
+    if not image_path:
+        image_path = os.path.join(temp_dir, "prd-diagram.png")
+        write_sample_png(image_path)
+    markdown = generated_prd_fixture(image_path=image_path, sections=args.sections)
+    expected = strip_trailing_ws(normalize_markdown_text(markdown, table_mode=args.table_mode))
+    docx_token, stats = create_docx_from_markdown(
+        markdown,
+        token,
+        title=args.title,
+        folder_token=args.folder_token,
+        base_dir=temp_dir,
+        chunk_size=args.chunk_size,
+        table_mode=args.table_mode,
+    )
+    time.sleep(args.settle_seconds)
+    actual_blocks = all_docx_blocks(docx_token, token, page_size=100)
+    actual = strip_trailing_ws(blocks_to_text([block for block in actual_blocks if block.get("block_id") != docx_token]))
+    diff = list(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="expected",
+            tofile="actual",
+            lineterm="",
+        )
+    )
+    image_blocks = [block for block in actual_blocks if block.get("image")]
+    table_blocks = [block for block in actual_blocks if block.get("table")]
+    expected_table_blocks = stats["tables"] if args.table_mode == "native" else 0
+    result = {
+        "code": 0 if not diff and image_blocks and len(table_blocks) == expected_table_blocks else 1,
+        "docx_token": docx_token,
+        "title": args.title,
+        **stats,
+        "expected_lines": len(expected.splitlines()),
+        "actual_lines": len(actual.splitlines()),
+        "read_blocks": len(actual_blocks),
+        "table_blocks": len(table_blocks),
+        "image_blocks": len(image_blocks),
+        "text_matched": not diff,
+        "table_mode": args.table_mode,
+        "matched": bool(not diff and image_blocks and len(table_blocks) == expected_table_blocks),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if diff:
+        print("\n".join(diff[: args.max_diff_lines]))
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(os.path.join(args.output_dir, "source.md"), "w", encoding="utf-8") as fh:
+            fh.write(markdown)
+        with open(os.path.join(args.output_dir, "expected.txt"), "w", encoding="utf-8") as fh:
+            fh.write(expected + "\n")
+        with open(os.path.join(args.output_dir, "actual.txt"), "w", encoding="utf-8") as fh:
+            fh.write(actual + "\n")
+    return 0 if result["matched"] else 1
 
 
 def command_roundtrip_media(args: argparse.Namespace) -> int:
@@ -809,7 +1193,17 @@ def build_parser() -> argparse.ArgumentParser:
     append.add_argument("markdown")
     append.add_argument("--env", help="optional env file")
     append.add_argument("--chunk-size", type=int, default=20)
+    append.add_argument("--table-mode", choices=["native", "text"], default="native")
     append.set_defaults(func=command_append_docx_md)
+
+    write_prd = subparsers.add_parser("write-prd-md", help="create a Docx document from PRD Markdown with tables and local images")
+    write_prd.add_argument("markdown")
+    write_prd.add_argument("--env", help="optional env file")
+    write_prd.add_argument("--title", help="document title; defaults to first H1 or filename")
+    write_prd.add_argument("--folder-token", help="optional destination folder token")
+    write_prd.add_argument("--chunk-size", type=int, default=20)
+    write_prd.add_argument("--table-mode", choices=["native", "text"], default="text")
+    write_prd.set_defaults(func=command_write_prd_md)
 
     roundtrip = subparsers.add_parser("roundtrip-docx", help="create, write, read back, and diff a Docx test document")
     roundtrip.add_argument("--env", help="optional env file")
@@ -819,6 +1213,7 @@ def build_parser() -> argparse.ArgumentParser:
     roundtrip.add_argument("--sections", type=int, default=8)
     roundtrip.add_argument("--paragraphs-per-section", type=int, default=4)
     roundtrip.add_argument("--chunk-size", type=int, default=20)
+    roundtrip.add_argument("--table-mode", choices=["native", "text"], default="native")
     roundtrip.add_argument("--settle-seconds", type=float, default=1.5)
     roundtrip.add_argument("--max-diff-lines", type=int, default=120)
     roundtrip.add_argument("--output-dir", help="write source/expected/actual comparison files")
@@ -831,6 +1226,19 @@ def build_parser() -> argparse.ArgumentParser:
     media.add_argument("--image", help="optional local image path; a tiny PNG is generated when omitted")
     media.add_argument("--settle-seconds", type=float, default=2.0)
     media.set_defaults(func=command_roundtrip_media)
+
+    prd = subparsers.add_parser("roundtrip-prd", help="create, write, and validate a PRD-style Docx with tables and image")
+    prd.add_argument("--env", help="optional env file")
+    prd.add_argument("--title", default="feishu-docs PRD validation")
+    prd.add_argument("--folder-token", help="optional destination folder token")
+    prd.add_argument("--image", help="optional local image path; a tiny PNG is generated when omitted")
+    prd.add_argument("--sections", type=int, default=6)
+    prd.add_argument("--chunk-size", type=int, default=16)
+    prd.add_argument("--table-mode", choices=["native", "text"], default="text")
+    prd.add_argument("--settle-seconds", type=float, default=2.0)
+    prd.add_argument("--max-diff-lines", type=int, default=160)
+    prd.add_argument("--output-dir", help="write source/expected/actual comparison files")
+    prd.set_defaults(func=command_roundtrip_prd)
 
     return parser
 

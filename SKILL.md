@@ -113,9 +113,38 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env
 
 The command should report `matched: true`, with both `table.validated` and `image.validated` set to `true`.
 
+### Write PRD Markdown
+
+Use `write-prd-md` for real PRD publishing. It supports headings, paragraphs, ordered/unordered lists, task-list text, Markdown tables, local images, quote text, and fenced code as plain text.
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-prd-md ./prd.md --env .env
+```
+
+By default, PRD tables are written as aligned text rows because this is much more reliable for long PRDs with many tables. To use native Feishu tables for small documents:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-prd-md ./prd.md --env .env --table-mode native
+```
+
+Validate the PRD path:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-prd --env .env
+```
+
+For production PRDs, prefer the default `--table-mode text` unless the user explicitly needs editable native Feishu table cells.
+
 ## Bitable Notes
 
-This first version supports credential checks, URL resolution, Docx reads, Docx Markdown-subset appends, Docx roundtrip validation, and table/image insertion validation. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
+This version supports credential checks, URL resolution, Docx reads, Docx Markdown-subset appends, PRD Markdown publishing, Docx roundtrip validation, and table/image insertion validation. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
+
+## Reliability Guidance
+
+- Native Feishu tables are supported and validated by `roundtrip-media`, but they require many per-cell write requests. For long PRDs, use `--table-mode text` to avoid connection drops or accidental duplicate cells.
+- Non-idempotent write requests are not automatically retried. If a write fails due to a network disconnect, rerun into a fresh test document and inspect the partial document if needed.
+- Quote blocks and code blocks are written as plain text for stability.
+- Local image paths in Markdown, such as `![diagram](./diagram.png)`, are uploaded and inserted into the document. Remote image URLs are not downloaded automatically yet.
 
 When implementing Bitable writes:
 
