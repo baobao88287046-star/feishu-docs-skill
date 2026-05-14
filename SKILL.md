@@ -188,10 +188,16 @@ Use `append-docx-md` only when the user explicitly wants to preserve existing co
 
 ### Restore Flowcharts Into Feishu Boards
 
-When the user asks to restore a flowchart in Feishu, ask or infer which output they want:
+When the user asks to create or restore a flowchart in Feishu, choose the output mode with this policy:
+
+- If the user provides a visual reference, such as an SVG, screenshot, image, PDF, exported diagram, or says "参考图 / 照着图 / 还原 / 复原" with a file or image available, ask once before creating the board: "要按图片 1:1 还原，还是转成简化版可编辑泳道图？"
+- If the user already specifies either mode, follow that mode without asking.
+- If the user only provides text, steps, roles, or a process description, do not ask. Default to the editable swimlane version.
+
+Output modes:
 
 - **1:1 restoration**: preserve the original visual design as closely as possible.
-- **Editable swimlane version**: simplify the process into Feishu's native board table/swimlane component.
+- **Editable swimlane version**: simplify the process into Feishu's native board table/swimlane component. This is the default for text-only flowchart generation.
 
 For both routes, create or reuse a Docx Board block first:
 

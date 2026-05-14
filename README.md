@@ -140,6 +140,9 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./docume
 
 The skill supports two board-restoration patterns:
 
+- If a visual reference is available, such as an SVG, screenshot, image, PDF, or exported diagram, ask whether to create a **1:1 restoration** or an **editable swimlane version** unless the user already chose one.
+- If the user only provides text, steps, roles, or a process description, default to the **editable swimlane version** without asking.
+
 - **1:1 restoration**: convert SVG/diagram source to Feishu board OpenAPI nodes, usually through `whiteboard-cli -t openapi`, then upload with `create-board-nodes`.
 - **Editable swimlane version**: use Feishu board `table` nodes as the swimlane carrier. Create flow blocks/connectors first, then create the `table` node with `table.cells[].children` referencing the returned node IDs.
 
