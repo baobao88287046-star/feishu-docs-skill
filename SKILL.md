@@ -272,6 +272,7 @@ Swimlane geometry rules:
 - Use a grid layout for editable swimlanes. Within the same row, align related process blocks and decision diamonds to the same `y` center; within the same column, align vertical handoff blocks to the same `x` center. Prefer consistent row baselines such as `step2_y`, `step3_y`, `step4_y` instead of ad hoc positions.
 - If two vertically adjacent flow steps can share the same `x` center without connector crossings, text overlap, or boundary collision, align them vertically. This is especially important for the main handoff chain between the last node of one stage and the first node of the next stage.
 - Use a safe inset of at least `32` from every cell border. Use `48` when a block has incoming or outgoing connectors near that border.
+- Keep block centers away from table row/column dividers. A block center should not sit on or near a swimlane divider; keep at least `80` horizontal distance from vertical dividers and at least `56` vertical distance from horizontal dividers unless the block is a header/stage label.
 - A process block must fully fit inside its cell: `block.x >= cell_left + inset`, `block.y >= cell_top + inset`, `block.x + block.width <= cell_right - inset`, and `block.y + block.height <= cell_bottom - inset`.
 - Never center a block on a swimlane divider or table border. If a block would overlap a row/column line, enlarge the row/column or move the block inward.
 - Prefer compact block widths instead of filling cell width. Use the shortest width that preserves readable text and connectors: `220-260` for short one-line labels, `240-280` for typical two-line Chinese labels, and only use `300+` for genuinely long labels that would otherwise clip or wrap poorly.
@@ -283,6 +284,8 @@ Swimlane geometry rules:
 - Connector endpoints should touch or slightly overlap the block border by `0-4` units so the line appears attached after Feishu renders arrowheads. Do not leave a visible gap.
 - Keep arrowheads outside text areas. If the line would collide with a label, route it through whitespace or move the blocks apart.
 - Use dashed red feedback lines only for reverse/rework paths. Route them on a separate track below or above normal flow, with at least `24` clearance from block text and borders.
+- Keep feedback/rework connectors local. A dashed red connector should normally stay within the same table cell or the same actor column. Do not draw long dashed lines that cross multiple swimlane columns. If the rework target is in another column, prefer adding a local red rework block in the source cell or a short note such as "退回补充" / "反馈修改" rather than a cross-column dashed connector.
+- A connector may cross a vertical divider only when it represents the main forward handoff between adjacent actor columns. It should not run along a divider, overlap a divider, or cross more than one vertical divider in a single segment. Split or reroute if a connector bounding box spans more than two adjacent content columns.
 - For decision diamonds, reserve more width than rectangles and keep connectors on their left/right/top/bottom tips. Do not let a diamond touch a cell border.
 - If a row or column cannot satisfy these spacing rules, enlarge the table dimensions or row/column size before creating nodes. Do not shrink blocks until text becomes cramped.
 
@@ -293,6 +296,8 @@ Before uploading an editable swimlane board, run a manual layout checklist again
 - No text is clipped inside a block.
 - Every connector endpoint lands on the intended block edge.
 - Every decision branch has an inline connector label (`是`/`否`) when captions are supported.
+- No block center is near a swimlane divider, and no connector segment runs along a divider.
+- No feedback/rework dashed connector crosses multiple columns; use local rework blocks instead.
 - Every visible connector segment is long enough to show a clean arrowhead.
 - No connector overlaps important text or cuts through a process block unless it is intentionally attached to that block.
 - The rightmost and bottommost blocks still have safe padding inside the table.
