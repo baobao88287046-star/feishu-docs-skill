@@ -270,10 +270,13 @@ Swimlane geometry rules:
 
 - Treat every table cell as a hard container. Before creating nodes, compute each cell's bounds from the table `x/y`, `row_sizes`, and `col_sizes`.
 - Use a grid layout for editable swimlanes. Within the same row, align related process blocks and decision diamonds to the same `y` center; within the same column, align vertical handoff blocks to the same `x` center. Prefer consistent row baselines such as `step2_y`, `step3_y`, `step4_y` instead of ad hoc positions.
+- If two vertically adjacent flow steps can share the same `x` center without connector crossings, text overlap, or boundary collision, align them vertically. This is especially important for the main handoff chain between the last node of one stage and the first node of the next stage.
 - Use a safe inset of at least `32` from every cell border. Use `48` when a block has incoming or outgoing connectors near that border.
 - A process block must fully fit inside its cell: `block.x >= cell_left + inset`, `block.y >= cell_top + inset`, `block.x + block.width <= cell_right - inset`, and `block.y + block.height <= cell_bottom - inset`.
 - Never center a block on a swimlane divider or table border. If a block would overlap a row/column line, enlarge the row/column or move the block inward.
-- Prefer block sizes around `230-320` wide and `72-96` high. For two-line Chinese labels, use at least `260x86`; for longer labels, widen the block or split the label into two concise lines.
+- Prefer compact block widths instead of filling cell width. Use the shortest width that preserves readable text and connectors: `220-260` for short one-line labels, `240-280` for typical two-line Chinese labels, and only use `300+` for genuinely long labels that would otherwise clip or wrap poorly.
+- Do not leave large empty horizontal padding inside rectangles. If a block's text occupies much less than the block width and no connector requires that width, shrink the block.
+- Prefer block heights around `60-78` for normal process blocks. Use taller blocks only when multi-line text would clip.
 - Keep at least `56` vertical gap between stacked blocks and at least `80` horizontal gap between neighboring blocks. If a connector needs an arrowhead between blocks, reserve at least `60` clear line length between the two block edges.
 - Keep repeated elements visually consistent: normal process blocks in the same lane should share width/height where practical; decision diamonds in the same diagram should share width/height; rejection/rework blocks should share size and color.
 - Draw connectors from block edge to block edge, not from center to center. Horizontal flow: source right-midpoint to target left-midpoint. Vertical flow: source bottom-midpoint to target top-midpoint.
