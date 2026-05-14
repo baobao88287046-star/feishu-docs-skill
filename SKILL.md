@@ -247,7 +247,33 @@ Recommended table pattern for business flow swimlanes:
 - Column 1: stage labels, e.g. `step1`, `step2`, `step3`.
 - Remaining columns: actors or responsibility areas, e.g. `C 端`, `B 端`, `结果 / 复用`.
 - Use wider columns for areas with more nodes; add a final result column when right-side content would otherwise overflow.
-- Keep connectors short and inside the target cell when possible.
+- Keep connectors direct and readable, but never so short that the arrowhead touches text or looks detached from the source/target block.
+
+Swimlane geometry rules:
+
+- Treat every table cell as a hard container. Before creating nodes, compute each cell's bounds from the table `x/y`, `row_sizes`, and `col_sizes`.
+- Use a safe inset of at least `32` from every cell border. Use `48` when a block has incoming or outgoing connectors near that border.
+- A process block must fully fit inside its cell: `block.x >= cell_left + inset`, `block.y >= cell_top + inset`, `block.x + block.width <= cell_right - inset`, and `block.y + block.height <= cell_bottom - inset`.
+- Never center a block on a swimlane divider or table border. If a block would overlap a row/column line, enlarge the row/column or move the block inward.
+- Prefer block sizes around `230-320` wide and `72-96` high. For two-line Chinese labels, use at least `260x86`; for longer labels, widen the block or split the label into two concise lines.
+- Keep at least `56` vertical gap between stacked blocks and at least `80` horizontal gap between neighboring blocks. If a connector needs an arrowhead between blocks, reserve at least `60` clear line length between the two block edges.
+- Draw connectors from block edge to block edge, not from center to center. Horizontal flow: source right-midpoint to target left-midpoint. Vertical flow: source bottom-midpoint to target top-midpoint.
+- Connector endpoints should touch or slightly overlap the block border by `0-4` units so the line appears attached after Feishu renders arrowheads. Do not leave a visible gap.
+- Keep arrowheads outside text areas. If the line would collide with a label, route it through whitespace or move the blocks apart.
+- Use dashed red feedback lines only for reverse/rework paths. Route them on a separate track below or above normal flow, with at least `24` clearance from block text and borders.
+- For decision diamonds, reserve more width than rectangles and keep connectors on their left/right/top/bottom tips. Do not let a diamond touch a cell border.
+- If a row or column cannot satisfy these spacing rules, enlarge the table dimensions or row/column size before creating nodes. Do not shrink blocks until text becomes cramped.
+
+Before uploading an editable swimlane board, run a manual layout checklist against the JSON:
+
+- Build a small layout map first: list each cell's `{left, top, right, bottom}`, each block's `{left, top, right, bottom, center_x, center_y}`, and each connector's start/end coordinates.
+- No block crosses or touches a table border or swimlane divider.
+- No text is clipped inside a block.
+- Every connector endpoint lands on the intended block edge.
+- Every visible connector segment is long enough to show a clean arrowhead.
+- No connector overlaps important text or cuts through a process block unless it is intentionally attached to that block.
+- The rightmost and bottommost blocks still have safe padding inside the table.
+- If any check fails, fix the JSON layout before calling `create-board-nodes`; do not rely on manual cleanup in Feishu.
 
 Minimal table node shape:
 

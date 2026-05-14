@@ -148,6 +148,8 @@ The skill supports two board-restoration patterns:
 
 Important: setting `parent_id` on flow nodes is not enough to attach them to the table. The reliable template-style swimlane relationship is stored in `table.cells[].children`.
 
+For editable swimlanes, compute cell bounds before creating nodes. Keep process blocks fully inside cells with at least `32` padding from borders and dividers, use larger rows/columns instead of cramped labels, and draw connectors edge-to-edge with clear arrowhead space. Before upload, map every cell bounds, block bounding box, and connector endpoint. Do not upload a board JSON if connectors float near blocks, cross text, or if blocks touch table boundaries.
+
 ## Feishu Requirements
 
 The enterprise app must have the required API scopes and the target document must add the app as a document app/collaborator.
