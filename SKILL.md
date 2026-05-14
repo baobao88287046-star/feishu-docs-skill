@@ -242,12 +242,28 @@ Important creation order:
 
 Do **not** rely on setting `parent_id` when creating flow blocks. Feishu may ignore it on create. The reliable relationship is the table cell's `children` list.
 
+When iterating on a swimlane generated from a reference board, preserve the reference board's business logic first. Do not add, remove, or reorder process transitions just to make connector layout easier unless the user explicitly asks to change the process. For example, if the first acceptable version has the clearest process logic, reuse that process graph and only change connector implementation, spacing, labels, or colors.
+
 Recommended table pattern for business flow swimlanes:
 
 - Column 1: stage labels, e.g. `step1`, `step2`, `step3`.
 - Remaining columns: actors or responsibility areas, e.g. `C 端`, `B 端`, `结果 / 复用`.
 - Use wider columns for areas with more nodes; add a final result column when right-side content would otherwise overflow.
 - Keep connectors direct and readable, but never so short that the arrowhead touches text or looks detached from the source/target block.
+
+Connector rules for Feishu Board swimlanes:
+
+- Prefer object-bound connectors over absolute coordinate connectors. Create shapes first, capture returned IDs, then create connectors with `connector.start.attached_object.id` and `connector.end.attached_object.id`.
+- Do not use `snap_to: "auto"` for swimlane connectors. Feishu may route the connector to an unexpected edge and draw lines along table boundaries. Use explicit edges:
+  - Horizontal forward flow: source `right` to target `left`.
+  - Vertical forward flow: source `bottom` to target `top`.
+  - Reverse/feedback flow: choose explicit `top`/`bottom`/`left`/`right` edges that route through open space; keep it dashed red.
+- If creating connectors through OpenAPI, `attached_object` must include `snap_to` as one of `top`, `right`, `bottom`, or `left`. `snap_to: "auto"` is allowed by the API but should be avoided for swimlanes.
+- Avoid using `specified_coordinate: true` for normal process connectors inside table swimlanes. It creates absolute-position lines that can appear detached from shapes after Feishu renders the board.
+- Avoid cross-row or cross-cell `polyline` routes with manual `turning_points` unless the points have been verified visually in Feishu. Object-bound connectors with explicit `snap_to` edges are safer than coordinate polyline routes.
+- For decision diamonds, every outgoing branch must be labeled with `是` or `否`. Use small editable text boxes or connector captions near the corresponding branch; do not rely on the diamond text alone.
+- Preserve semantic colors across iterations: blue for normal process blocks, yellow/orange for decision diamonds, red/pink for rejection or rework, green for final success, and orange for reuse/loop notes such as "新增账号：复用 step2-4".
+- Do not downgrade semantic result blocks to ordinary blue blocks when simplifying a swimlane.
 
 Swimlane geometry rules:
 

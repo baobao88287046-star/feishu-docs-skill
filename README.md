@@ -150,6 +150,8 @@ Important: setting `parent_id` on flow nodes is not enough to attach them to the
 
 For editable swimlanes, compute cell bounds before creating nodes. Keep process blocks fully inside cells with at least `32` padding from borders and dividers, use larger rows/columns instead of cramped labels, and draw connectors edge-to-edge with clear arrowhead space. Before upload, map every cell bounds, block bounding box, and connector endpoint. Do not upload a board JSON if connectors float near blocks, cross text, or if blocks touch table boundaries.
 
+When refining a reference swimlane, preserve the reference process logic first. Fix connector implementation and spacing without inventing new transitions. Prefer object-bound connectors using `attached_object.id` with explicit `snap_to` edges (`right -> left`, `bottom -> top`) and avoid `snap_to: auto` in table swimlanes. Decision diamonds need visible `是/否` branch labels, and semantic colors must be preserved: green success blocks, orange reuse notes, red rejection/rework, yellow decisions, blue normal steps.
+
 ## Feishu Requirements
 
 The enterprise app must have the required API scopes and the target document must add the app as a document app/collaborator.
