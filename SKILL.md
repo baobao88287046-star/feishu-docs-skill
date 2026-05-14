@@ -262,17 +262,20 @@ Connector rules for Feishu Board swimlanes:
 - Avoid using `specified_coordinate: true` for normal process connectors inside table swimlanes. It creates absolute-position lines that can appear detached from shapes after Feishu renders the board.
 - Avoid cross-row or cross-cell `polyline` routes with manual `turning_points` unless the points have been verified visually in Feishu. Object-bound connectors with explicit `snap_to` edges are safer than coordinate polyline routes.
 - For decision diamonds, every outgoing branch must be labeled with `是` or `否`. Use small editable text boxes or connector captions near the corresponding branch; do not rely on the diamond text alone.
+- Prefer connector captions for `是`/`否` labels instead of separate floating text boxes. Use `connector.captions.data` with a short text object, set `connector.caption_position_type` to `0` (`OnLine`), and place it with `connector.caption_position` around `0.45` to `0.6` so the label sits on the branch line. Use separate text boxes only if Feishu rejects captions for that connector.
 - Preserve semantic colors across iterations: blue for normal process blocks, yellow/orange for decision diamonds, red/pink for rejection or rework, green for final success, and orange for reuse/loop notes such as "新增账号：复用 step2-4".
 - Do not downgrade semantic result blocks to ordinary blue blocks when simplifying a swimlane.
 
 Swimlane geometry rules:
 
 - Treat every table cell as a hard container. Before creating nodes, compute each cell's bounds from the table `x/y`, `row_sizes`, and `col_sizes`.
+- Use a grid layout for editable swimlanes. Within the same row, align related process blocks and decision diamonds to the same `y` center; within the same column, align vertical handoff blocks to the same `x` center. Prefer consistent row baselines such as `step2_y`, `step3_y`, `step4_y` instead of ad hoc positions.
 - Use a safe inset of at least `32` from every cell border. Use `48` when a block has incoming or outgoing connectors near that border.
 - A process block must fully fit inside its cell: `block.x >= cell_left + inset`, `block.y >= cell_top + inset`, `block.x + block.width <= cell_right - inset`, and `block.y + block.height <= cell_bottom - inset`.
 - Never center a block on a swimlane divider or table border. If a block would overlap a row/column line, enlarge the row/column or move the block inward.
 - Prefer block sizes around `230-320` wide and `72-96` high. For two-line Chinese labels, use at least `260x86`; for longer labels, widen the block or split the label into two concise lines.
 - Keep at least `56` vertical gap between stacked blocks and at least `80` horizontal gap between neighboring blocks. If a connector needs an arrowhead between blocks, reserve at least `60` clear line length between the two block edges.
+- Keep repeated elements visually consistent: normal process blocks in the same lane should share width/height where practical; decision diamonds in the same diagram should share width/height; rejection/rework blocks should share size and color.
 - Draw connectors from block edge to block edge, not from center to center. Horizontal flow: source right-midpoint to target left-midpoint. Vertical flow: source bottom-midpoint to target top-midpoint.
 - Connector endpoints should touch or slightly overlap the block border by `0-4` units so the line appears attached after Feishu renders arrowheads. Do not leave a visible gap.
 - Keep arrowheads outside text areas. If the line would collide with a label, route it through whitespace or move the blocks apart.
@@ -286,6 +289,7 @@ Before uploading an editable swimlane board, run a manual layout checklist again
 - No block crosses or touches a table border or swimlane divider.
 - No text is clipped inside a block.
 - Every connector endpoint lands on the intended block edge.
+- Every decision branch has an inline connector label (`是`/`否`) when captions are supported.
 - Every visible connector segment is long enough to show a clean arrowhead.
 - No connector overlaps important text or cuts through a process block unless it is intentionally attached to that block.
 - The rightmost and bottommost blocks still have safe padding inside the table.
