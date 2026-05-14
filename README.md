@@ -65,6 +65,19 @@ Read a Feishu Wiki or Docx link:
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py read-url 'https://xxx.feishu.cn/wiki/xxx' --env .env --format text
 ```
 
+Append an empty editable board to a Docx:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py add-docx-board <docx_token> --env .env
+```
+
+Read and write Feishu board nodes:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py board-nodes <whiteboard_token> --env .env
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py create-board-nodes <whiteboard_token> ./nodes.json --env .env
+```
+
 Validate long Docx writing:
 
 ```bash
@@ -122,6 +135,15 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./docume
 ```
 
 `write-prd-md` remains available as a compatibility alias, but the recommended entry point is `write-doc-md`.
+
+## Flowchart Board Restoration
+
+The skill supports two board-restoration patterns:
+
+- **1:1 restoration**: convert SVG/diagram source to Feishu board OpenAPI nodes, usually through `whiteboard-cli -t openapi`, then upload with `create-board-nodes`.
+- **Editable swimlane version**: use Feishu board `table` nodes as the swimlane carrier. Create flow blocks/connectors first, then create the `table` node with `table.cells[].children` referencing the returned node IDs.
+
+Important: setting `parent_id` on flow nodes is not enough to attach them to the table. The reliable template-style swimlane relationship is stored in `table.cells[].children`.
 
 ## Feishu Requirements
 

@@ -21,6 +21,7 @@ import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -254,6 +255,47 @@ def docx_blocks(docx_token: str, token: str, page_size: int = 50, page_token: Op
     )
 
 
+def docx_root_block(docx_token: str, token: str) -> Dict[str, Any]:
+    data = docx_blocks(docx_token, token, page_size=1)
+    if data.get("code") != 0:
+        raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+    items = data.get("data", {}).get("items", [])
+    if not items:
+        raise FeishuError(f"cannot read root block for docx: {docx_token}")
+    return items[0]
+
+
+def docx_root_child_count(docx_token: str, token: str) -> int:
+    children = docx_root_block(docx_token, token).get("children", [])
+    return len(children or [])
+
+
+def delete_docx_children(
+    docx_token: str,
+    parent_block_id: str,
+    token: str,
+    start_index: int,
+    end_index: int,
+) -> Dict[str, Any]:
+    return request_json(
+        "DELETE",
+        f"/docx/v1/documents/{docx_token}/blocks/{parent_block_id}/children/batch_delete",
+        token=token,
+        query={"document_revision_id": -1},
+        body={"start_index": start_index, "end_index": end_index},
+    )
+
+
+def clear_docx_body(docx_token: str, token: str) -> int:
+    count = docx_root_child_count(docx_token, token)
+    if count <= 0:
+        return 0
+    data = delete_docx_children(docx_token, docx_token, token, 0, count)
+    if data.get("code") != 0:
+        raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+    return count
+
+
 def create_docx(title: str, token: str, folder_token: Optional[str] = None) -> Dict[str, Any]:
     body: Dict[str, Any] = {"title": title}
     if folder_token:
@@ -284,6 +326,43 @@ def patch_docx_block(docx_token: str, block_id: str, token: str, body: Dict[str,
         token=token,
         query={"document_revision_id": -1},
         body=body,
+    )
+
+
+def add_docx_board(docx_token: str, token: str, index: int = -1) -> Dict[str, Any]:
+    return create_docx_children(docx_token, docx_token, token, [{"block_type": 43, "board": {}}], index=index)
+
+
+def extract_board_token(response: Dict[str, Any]) -> str:
+    for child in extract_created_children(response):
+        board = child.get("board")
+        if isinstance(board, dict) and board.get("token"):
+            return board["token"]
+    raise FeishuError(f"cannot find board token in response: {json.dumps(response, ensure_ascii=False)}")
+
+
+def board_nodes(whiteboard_token: str, token: str) -> Dict[str, Any]:
+    return request_json("GET", f"/board/v1/whiteboards/{whiteboard_token}/nodes", token=token)
+
+
+def create_board_nodes(
+    whiteboard_token: str,
+    token: str,
+    nodes: List[Dict[str, Any]],
+    user_id_type: str = "open_id",
+    client_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not isinstance(nodes, list) or not nodes:
+        raise FeishuError("nodes JSON must be a non-empty array")
+    return request_json(
+        "POST",
+        f"/board/v1/whiteboards/{whiteboard_token}/nodes",
+        token=token,
+        query={
+            "user_id_type": user_id_type,
+            "client_token": client_token or str(uuid.uuid4()),
+        },
+        body={"nodes": nodes},
     )
 
 
@@ -646,8 +725,9 @@ def write_ops_in_order(
     token: str,
     ops: List[Dict[str, Any]],
     chunk_size: int,
+    start_index: int = 0,
 ) -> Dict[str, int]:
-    index = 0
+    index = start_index
     written_blocks = 0
     table_count = 0
     image_count = 0
@@ -689,7 +769,91 @@ def write_ops_in_order(
         else:
             raise FeishuError(f"unknown markdown op type: {op_type}")
     flush_blocks()
-    return {"top_level_blocks": index, "written_text_blocks": written_blocks, "tables": table_count, "images": image_count}
+    return {
+        "start_index": start_index,
+        "top_level_blocks": index - start_index,
+        "end_index": index,
+        "written_text_blocks": written_blocks,
+        "tables": table_count,
+        "images": image_count,
+    }
+
+
+def write_ops_with_resume(
+    docx_token: str,
+    token: str,
+    ops: List[Dict[str, Any]],
+    chunk_size: int,
+    retry_limit: int,
+    retry_sleep: float,
+) -> Dict[str, int]:
+    total = len(ops)
+    attempts = 0
+    while True:
+        current = docx_root_child_count(docx_token, token)
+        if current >= total:
+            return {"top_level_blocks": total, "resume_attempts": attempts}
+        op = ops[current]
+        try:
+            if op.get("type") == "block":
+                blocks = [op["block"]]
+                for next_op in ops[current + 1 : min(current + chunk_size, total)]:
+                    if next_op.get("type") != "block":
+                        break
+                    blocks.append(next_op["block"])
+                data = create_docx_children(docx_token, docx_token, token, blocks, index=-1)
+                if data.get("code") != 0:
+                    raise FeishuError(json.dumps(data, ensure_ascii=False, indent=2))
+            elif op.get("type") == "table":
+                create_table_with_values(docx_token, token, op["values"], index=-1)
+            elif op.get("type") == "image":
+                image_path = op["path"]
+                if urllib.parse.urlparse(image_path).scheme:
+                    raise FeishuError("remote image URLs are not supported yet; download the image locally first")
+                if not os.path.exists(image_path):
+                    raise FeishuError(f"image file not found: {image_path}")
+                create_image_block_with_file(docx_token, token, image_path, index=-1)
+            else:
+                raise FeishuError(f"unknown markdown op type: {op.get('type')}")
+            time.sleep(0.45)
+        except (FeishuError, urllib.error.URLError, http.client.RemoteDisconnected):
+            attempts += 1
+            if attempts > retry_limit:
+                raise
+            time.sleep(retry_sleep)
+
+
+def replace_docx_with_markdown(
+    docx_token: str,
+    token: str,
+    markdown: str,
+    base_dir: Optional[str],
+    chunk_size: int,
+    table_mode: str,
+    retry_limit: int,
+    retry_sleep: float,
+) -> Dict[str, Any]:
+    resolved_table_mode = choose_table_mode(markdown, table_mode)
+    ops = markdown_to_ops(markdown, base_dir=base_dir, table_mode=resolved_table_mode)
+    cleared = clear_docx_body(docx_token, token)
+    stats = write_ops_with_resume(
+        docx_token,
+        token,
+        ops,
+        chunk_size=max(1, chunk_size),
+        retry_limit=max(0, retry_limit),
+        retry_sleep=max(0.0, retry_sleep),
+    )
+    return {
+        "cleared_blocks": cleared,
+        "table_mode": resolved_table_mode,
+        "top_level_blocks": stats.get("top_level_blocks", 0),
+        "written_text_blocks": sum(1 for op in ops if op.get("type") == "block"),
+        "tables": sum(1 for op in ops if op.get("type") == "table"),
+        "images": sum(1 for op in ops if op.get("type") == "image"),
+        "resume_attempts": stats.get("resume_attempts", 0),
+        "root_child_count": docx_root_child_count(docx_token, token),
+    }
 
 
 def normalize_markdown_text(markdown: str, table_mode: str = "native") -> str:
@@ -965,17 +1129,76 @@ def command_create_docx(args: argparse.Namespace) -> int:
     return 0 if data.get("code") == 0 else 1
 
 
+def command_add_docx_board(args: argparse.Namespace) -> int:
+    load_credentials_env(args.env)
+    token = get_token_or_raise()
+    data = add_docx_board(args.docx_token, token, index=args.index)
+    board_token = extract_board_token(data)
+    print(
+        json.dumps(
+            {"code": 0, "docx_token": args.docx_token, "board_token": board_token, "response": data},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def command_board_nodes(args: argparse.Namespace) -> int:
+    load_credentials_env(args.env)
+    token = get_token_or_raise()
+    data = board_nodes(args.whiteboard_token, token)
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0 if data.get("code") == 0 else 1
+
+
+def command_create_board_nodes(args: argparse.Namespace) -> int:
+    load_credentials_env(args.env)
+    token = get_token_or_raise()
+    with open(args.nodes_json, "r", encoding="utf-8") as fh:
+        nodes = json.load(fh)
+    data = create_board_nodes(
+        args.whiteboard_token,
+        token,
+        nodes,
+        user_id_type=args.user_id_type,
+        client_token=args.client_token,
+    )
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0 if data.get("code") == 0 else 1
+
+
 def command_append_docx_md(args: argparse.Namespace) -> int:
     load_credentials_env(args.env)
     token = get_token_or_raise()
     with open(args.markdown, "r", encoding="utf-8") as fh:
         markdown = fh.read()
+    start_index = docx_root_child_count(args.docx_token, token)
     ops = markdown_to_ops(
         markdown,
         base_dir=os.path.dirname(os.path.abspath(args.markdown)),
         table_mode=args.table_mode,
     )
-    stats = write_ops_in_order(args.docx_token, token, ops, chunk_size=args.chunk_size)
+    stats = write_ops_in_order(args.docx_token, token, ops, chunk_size=args.chunk_size, start_index=start_index)
+    print(json.dumps({"code": 0, "docx_token": args.docx_token, **stats}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_replace_docx_md(args: argparse.Namespace) -> int:
+    load_credentials_env(args.env)
+    token = get_token_or_raise()
+    with open(args.markdown, "r", encoding="utf-8") as fh:
+        markdown = fh.read()
+    stats = replace_docx_with_markdown(
+        args.docx_token,
+        token,
+        markdown,
+        base_dir=os.path.dirname(os.path.abspath(args.markdown)),
+        chunk_size=args.chunk_size,
+        table_mode=args.table_mode,
+        retry_limit=args.retry_limit,
+        retry_sleep=args.retry_sleep,
+    )
     print(json.dumps({"code": 0, "docx_token": args.docx_token, **stats}, ensure_ascii=False, indent=2))
     return 0
 
@@ -1262,6 +1485,25 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--folder-token", help="optional destination folder token")
     create.set_defaults(func=command_create_docx)
 
+    add_board = subparsers.add_parser("add-docx-board", help="append an empty Board block to an existing Docx")
+    add_board.add_argument("docx_token")
+    add_board.add_argument("--env", help="optional env file")
+    add_board.add_argument("--index", type=int, default=-1, help="insertion index; -1 appends at the end")
+    add_board.set_defaults(func=command_add_docx_board)
+
+    get_board_nodes = subparsers.add_parser("board-nodes", help="read all nodes from a Feishu whiteboard")
+    get_board_nodes.add_argument("whiteboard_token")
+    get_board_nodes.add_argument("--env", help="optional env file")
+    get_board_nodes.set_defaults(func=command_board_nodes)
+
+    create_nodes = subparsers.add_parser("create-board-nodes", help="create Feishu whiteboard nodes from a JSON array file")
+    create_nodes.add_argument("whiteboard_token")
+    create_nodes.add_argument("nodes_json")
+    create_nodes.add_argument("--env", help="optional env file")
+    create_nodes.add_argument("--user-id-type", default="open_id")
+    create_nodes.add_argument("--client-token", help="optional idempotency token")
+    create_nodes.set_defaults(func=command_create_board_nodes)
+
     append = subparsers.add_parser("append-docx-md", help="append a Markdown subset to an existing Docx document")
     append.add_argument("docx_token")
     append.add_argument("markdown")
@@ -1269,6 +1511,19 @@ def build_parser() -> argparse.ArgumentParser:
     append.add_argument("--chunk-size", type=int, default=20)
     append.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
     append.set_defaults(func=command_append_docx_md)
+
+    replace = subparsers.add_parser(
+        "replace-docx-md",
+        help="replace an existing Docx body with Markdown using clear-and-resume writes",
+    )
+    replace.add_argument("docx_token")
+    replace.add_argument("markdown")
+    replace.add_argument("--env", help="optional env file")
+    replace.add_argument("--chunk-size", type=int, default=3)
+    replace.add_argument("--table-mode", choices=["auto", "native", "text"], default="auto")
+    replace.add_argument("--retry-limit", type=int, default=12)
+    replace.add_argument("--retry-sleep", type=float, default=2.0)
+    replace.set_defaults(func=command_replace_docx_md)
 
     write_doc = subparsers.add_parser("write-doc-md", help="create a Docx document from Markdown with automatic content-based handling")
     write_doc.add_argument("markdown")

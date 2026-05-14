@@ -17,7 +17,11 @@ Use the bundled helper for repeatable API calls:
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py doctor --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py resolve-url 'https://xxx.feishu.cn/wiki/...' --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py read-url 'https://xxx.feishu.cn/wiki/...' --env .env --format text
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py add-docx-board <docx_token> --env .env
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py board-nodes <whiteboard_token> --env .env
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py create-board-nodes <whiteboard_token> ./nodes.json --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./document.md --env .env
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py replace-docx-md <docx_token> ./document.md --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-prd --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-docx --env .env
 python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py roundtrip-media --env .env
@@ -167,6 +171,128 @@ python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py write-doc-md ./docume
 
 `write-prd-md` remains as a compatibility alias, but do not treat PRD as a special case. Choose behavior from the document content and user needs.
 
+### Replace An Existing Wiki/Docx Document
+
+When the user asks to write into an existing Feishu Wiki/Docx URL, prefer replacing the document body instead of appending manually:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py resolve-url 'https://xxx.feishu.cn/wiki/xxxx'
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py replace-docx-md <resolved_docx_token> ./document.md --table-mode text
+```
+
+`replace-docx-md` clears the existing Docx body, then writes Markdown blocks with read-back resume. If Feishu closes the connection after a successful write, the command re-reads the document's current block count and continues from the correct index, avoiding duplicate or out-of-order blocks.
+
+Use `--chunk-size 3` to `5` for long documents; the default is conservative and reliable. Use `--table-mode text` for long documents or PRD-like documents with many tables/lists.
+
+Use `append-docx-md` only when the user explicitly wants to preserve existing content and append after it. It appends at the current end of the document.
+
+### Restore Flowcharts Into Feishu Boards
+
+When the user asks to restore a flowchart in Feishu, ask or infer which output they want:
+
+- **1:1 restoration**: preserve the original visual design as closely as possible.
+- **Editable swimlane version**: simplify the process into Feishu's native board table/swimlane component.
+
+For both routes, create or reuse a Docx Board block first:
+
+```bash
+python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py add-docx-board <docx_token>
+```
+
+The command returns `board_token`, which is the whiteboard token for Board APIs.
+
+#### Route A: 1:1 Visual Restoration
+
+Use this when the user wants the original SVG/diagram appearance preserved.
+
+1. Convert SVG or diagram source to Feishu board OpenAPI nodes. If `whiteboard-cli` is available, prefer:
+
+   ```bash
+   whiteboard-cli -i ./diagram.svg -f svg -t openapi -o /tmp/diagram.nodes.json
+   ```
+
+2. Ensure the output is a JSON array of nodes or extract the nested `data.result.nodes` array.
+3. Assign stable `z_index` values in array order.
+4. Remove read-only/internal fields before posting: top-level `id`, `locked`, `children`, `parent_id`; `text.*_type`; `style.*_type`; connector `start_object` and `end_object`.
+5. Upload with:
+
+   ```bash
+   python3 ~/.codex/skills/feishu-docs/scripts/feishu_docs.py create-board-nodes <board_token> ./nodes.json
+   ```
+
+This route can produce many nodes. It is visually faithful but may be harder for humans to edit.
+
+#### Route B: Editable Swimlane Version
+
+Use this when the user wants a maintainable swimlane/process map rather than pixel-perfect restoration.
+
+Feishu's board swimlane template is exposed through the Board API as a `type: "table"` node. The table's `table.meta.row_sizes`, `table.meta.col_sizes`, and `table.cells` define the swimlane grid. Flow blocks and connectors are ordinary board nodes referenced by `table.cells[].children`.
+
+Important creation order:
+
+1. Create all flow blocks/connectors first with `create-board-nodes`; keep the returned IDs.
+2. Create the `table` node second.
+3. Put the returned IDs into the relevant `table.cells[].children` arrays.
+
+Do **not** rely on setting `parent_id` when creating flow blocks. Feishu may ignore it on create. The reliable relationship is the table cell's `children` list.
+
+Recommended table pattern for business flow swimlanes:
+
+- Column 1: stage labels, e.g. `step1`, `step2`, `step3`.
+- Remaining columns: actors or responsibility areas, e.g. `C 端`, `B 端`, `结果 / 复用`.
+- Use wider columns for areas with more nodes; add a final result column when right-side content would otherwise overflow.
+- Keep connectors short and inside the target cell when possible.
+
+Minimal table node shape:
+
+```json
+{
+  "type": "table",
+  "x": 60,
+  "y": 60,
+  "width": 1450,
+  "height": 880,
+  "z_index": 0,
+  "style": {
+    "border_color": "#000000",
+    "border_opacity": 100,
+    "border_style": "solid",
+    "border_width": "narrow",
+    "fill_opacity": 100
+  },
+  "table": {
+    "title": "",
+    "meta": {
+      "row_num": 5,
+      "col_num": 4,
+      "row_sizes": [70, 170, 220, 210, 210],
+      "col_sizes": [150, 470, 470, 360],
+      "style": {
+        "border_color": "#000000",
+        "border_opacity": 100,
+        "border_style": "solid",
+        "border_width": "extra_narrow",
+        "fill_opacity": 100
+      },
+      "text": {
+        "text": "",
+        "font_size": 14,
+        "font_weight": "regular",
+        "horizontal_align": "left",
+        "vertical_align": "top",
+        "text_color": "#1f2329"
+      }
+    },
+    "cells": [
+      {"row_index": 1, "col_index": 1, "text": {"text": "阶段", "font_size": 18, "font_weight": "bold", "horizontal_align": "center", "vertical_align": "mid", "text_color": "#1f2329"}, "style": {"fill_color": "#f5f5f5", "fill_opacity": 100}},
+      {"row_index": 2, "col_index": 2, "children": ["o1:1", "c1:1"], "style": {"fill_opacity": 100}}
+    ]
+  }
+}
+```
+
+For best maintainability, keep the swimlane version simpler than the 1:1 version: fewer nodes, larger blocks, and concise labels.
+
 ## Bitable Notes
 
 This version supports credential checks, URL resolution, Docx reads, Docx Markdown-subset appends, PRD Markdown publishing, Docx roundtrip validation, and table/image insertion validation. For Bitable writes, use the helper's token acquisition and resolved `app_token`, then call Feishu's Bitable endpoints according to the target table/field schema.
@@ -174,7 +300,8 @@ This version supports credential checks, URL resolution, Docx reads, Docx Markdo
 ## Reliability Guidance
 
 - Native Feishu tables are supported and validated by `roundtrip-media`, but they require many per-cell write requests. For long documents or documents with many tables, use automatic or text table mode to avoid connection drops or accidental duplicate cells.
-- Non-idempotent write requests are not automatically retried. If a write fails due to a network disconnect, rerun into a fresh test document and inspect the partial document if needed.
+- For replacing existing Docx content, use `replace-docx-md`; it is designed for network disconnects and resumes from the actual block count after each failure.
+- Non-idempotent append/create requests are not automatically retried. If a manual append fails due to a network disconnect, inspect the partial document before continuing.
 - Quote blocks and code blocks are written as plain text for stability.
 - Local image paths in Markdown, such as `![diagram](./diagram.png)`, are uploaded and inserted into the document. Remote image URLs are not downloaded automatically yet.
 

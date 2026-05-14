@@ -38,6 +38,22 @@ wiki:node:read
 docx:document
 ```
 
+Read and write Docx Board/whiteboard nodes:
+
+```text
+wiki:node:read
+docx:document
+board:whiteboard:node:read
+board:whiteboard:node:create
+```
+
+Add update/delete only when modifying or clearing existing board nodes:
+
+```text
+board:whiteboard:node:update
+board:whiteboard:node:delete
+```
+
 Read cloud file metadata:
 
 ```text
@@ -122,4 +138,3 @@ Likely causes:
 - App version not published after adding scopes.
 - The specific document did not add the app as collaborator/document app.
 - The URL is a Wiki node and was not resolved to `obj_token`.
-
